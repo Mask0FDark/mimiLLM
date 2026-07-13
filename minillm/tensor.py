@@ -1,0 +1,597 @@
+"""Непрерывный float32 Tensor и минимальный динамический граф autograd."""
+
+from __future__ import annotations
+
+import math
+import random
+from array import array
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
+
+from . import backend_python
+
+
+def _product(shape: Sequence[int]) -> int:
+    result = 1
+    for dimension in shape:
+        result *= dimension
+    return result
+
+
+def _contiguous_strides(shape: Sequence[int]) -> tuple[int, ...]:
+    stride = 1
+    result: list[int] = []
+    for dimension in reversed(shape):
+        result.append(stride)
+        stride *= dimension
+    return tuple(reversed(result))
+
+
+def _unravel(index: int, shape: Sequence[int]) -> list[int]:
+    coordinates: list[int] = []
+    for stride, dimension in zip(_contiguous_strides(shape), shape):
+        coordinates.append((index // stride) % dimension)
+    return coordinates
+
+
+def _ravel(coordinates: Sequence[int], strides: Sequence[int]) -> int:
+    return sum(coordinate * stride for coordinate, stride in zip(coordinates, strides))
+
+
+def _normalize_shape(shape: Sequence[int] | int | None, size: int) -> tuple[int, ...]:
+    if shape is None:
+        return (size,)
+    if isinstance(shape, int):
+        shape = (shape,)
+    normalized = tuple(int(value) for value in shape)
+    negative = [i for i, value in enumerate(normalized) if value == -1]
+    if len(negative) > 1:
+        raise ValueError("форма может содержать только один размер -1")
+    if negative:
+        known = _product([value for value in normalized if value != -1])
+        if known == 0 or size % known:
+            raise ValueError("невозможно вывести размер -1")
+        normalized = tuple(size // known if value == -1 else value for value in normalized)
+    if any(value < 0 for value in normalized):
+        raise ValueError("размеры Tensor не могут быть отрицательными")
+    if _product(normalized) != size:
+        raise ValueError(f"форма {normalized} требует {_product(normalized)} элементов, получено {size}")
+    return normalized
+
+
+def _broadcast_shape(left: Sequence[int], right: Sequence[int]) -> tuple[int, ...]:
+    length = max(len(left), len(right))
+    a = (1,) * (length - len(left)) + tuple(left)
+    b = (1,) * (length - len(right)) + tuple(right)
+    output: list[int] = []
+    for left_dim, right_dim in zip(a, b):
+        if left_dim != right_dim and left_dim != 1 and right_dim != 1:
+            raise ValueError(f"несовместимые формы для broadcasting: {tuple(left)} и {tuple(right)}")
+        output.append(max(left_dim, right_dim))
+    return tuple(output)
+
+
+def _broadcast_index(output_coords: Sequence[int], source_shape: Sequence[int]) -> int:
+    if not source_shape:
+        return 0
+    offset = len(output_coords) - len(source_shape)
+    coords = [0 if dim == 1 else output_coords[offset + i] for i, dim in enumerate(source_shape)]
+    return _ravel(coords, _contiguous_strides(source_shape))
+
+
+class Tensor:
+    """Плотный float32-тензор с данными и локальной backward-функцией.
+
+    Все представления непрерывны. Это сознательное ограничение первой версии:
+    операции перестановки осей копируют данные, поэтому C++ всегда получает
+    простой указатель на линейный буфер без сведений о Python-объектах.
+    """
+
+    def __init__(
+        self,
+        data: Iterable[float] | array,
+        shape: Sequence[int] | int | None = None,
+        *,
+        requires_grad: bool = False,
+        parents: tuple["Tensor", ...] = (),
+        backward_fn: Callable[[], None] | None = None,
+        operation: str = "",
+    ) -> None:
+        self.data = array("f", data)
+        self.shape = _normalize_shape(shape, len(self.data))
+        self.strides = _contiguous_strides(self.shape)
+        self.requires_grad = bool(requires_grad)
+        self.grad: array | None = None
+        self.parents = parents if self.requires_grad else ()
+        self._backward_fn = backward_fn
+        self.operation = operation
+
+    @property
+    def ndim(self) -> int:
+        """Число осей."""
+        return len(self.shape)
+
+    @property
+    def numel(self) -> int:
+        """Число float32-элементов в буфере."""
+        return len(self.data)
+
+    @classmethod
+    def zeros(cls, shape: Sequence[int] | int, *, requires_grad: bool = False) -> "Tensor":
+        normalized = (shape,) if isinstance(shape, int) else tuple(shape)
+        return cls(array("f", [0.0]) * _product(normalized), normalized, requires_grad=requires_grad)
+
+    @classmethod
+    def ones(cls, shape: Sequence[int] | int, *, requires_grad: bool = False) -> "Tensor":
+        normalized = (shape,) if isinstance(shape, int) else tuple(shape)
+        return cls(array("f", [1.0]) * _product(normalized), normalized, requires_grad=requires_grad)
+
+    @classmethod
+    def randn(
+        cls, shape: Sequence[int] | int, *, rng: random.Random | None = None,
+        scale: float = 1.0, requires_grad: bool = False,
+    ) -> "Tensor":
+        normalized = (shape,) if isinstance(shape, int) else tuple(shape)
+        source = rng or random
+        return cls(
+            (source.gauss(0.0, scale) for _ in range(_product(normalized))),
+            normalized, requires_grad=requires_grad,
+        )
+
+    def __repr__(self) -> str:
+        preview = list(self.data[:6])
+        suffix = "..." if self.numel > 6 else ""
+        return f"Tensor(shape={self.shape}, data={preview}{suffix}, requires_grad={self.requires_grad})"
+
+    def __len__(self) -> int:
+        if not self.shape:
+            raise TypeError("скалярный Tensor не имеет len()")
+        return self.shape[0]
+
+    def __getitem__(self, key: int | tuple[int, ...]) -> float | "Tensor":
+        keys = (key,) if isinstance(key, int) else key
+        if not isinstance(keys, tuple) or not all(isinstance(item, int) for item in keys):
+            raise TypeError("поддерживаются только целочисленные индексы")
+        if len(keys) > self.ndim:
+            raise IndexError("слишком много индексов")
+        normalized: list[int] = []
+        for axis, item in enumerate(keys):
+            dimension = self.shape[axis]
+            item = item + dimension if item < 0 else item
+            if not 0 <= item < dimension:
+                raise IndexError("индекс Tensor вне диапазона")
+            normalized.append(item)
+        offset = sum(item * self.strides[axis] for axis, item in enumerate(normalized))
+        if len(keys) == self.ndim:
+            return float(self.data[offset])
+        remaining_shape = self.shape[len(keys):]
+        count = _product(remaining_shape)
+        return Tensor(self.data[offset:offset + count], remaining_shape)
+
+    def item(self) -> float:
+        """Возвращает значение одноэлементного Tensor."""
+        if self.numel != 1:
+            raise ValueError("item() допустим только для одного элемента")
+        return float(self.data[0])
+
+    def tolist(self) -> list[float]:
+        """Возвращает плоскую Python-копию данных."""
+        return list(self.data)
+
+    def clone(self, *, requires_grad: bool | None = None) -> "Tensor":
+        """Создаёт независимую копию данных без графа."""
+        flag = self.requires_grad if requires_grad is None else requires_grad
+        return Tensor(self.data, self.shape, requires_grad=flag)
+
+    def detach(self) -> "Tensor":
+        """Создаёт копию, отсоединённую от графа."""
+        return Tensor(self.data, self.shape)
+
+    def contiguous(self) -> "Tensor":
+        """Возвращает Tensor; текущая реализация всегда непрерывна."""
+        return self
+
+    def zero_grad(self) -> None:
+        """Удаляет накопленный градиент."""
+        self.grad = None
+
+    def _accumulate_grad(self, values: Sequence[float]) -> None:
+        if not self.requires_grad:
+            return
+        if len(values) != self.numel:
+            raise ValueError("внутренняя ошибка: неверный размер градиента")
+        if self.grad is None:
+            self.grad = array("f", values)
+        else:
+            for i, value in enumerate(values):
+                self.grad[i] += value
+
+    def backward(self, gradient: "Tensor | Sequence[float] | float | None" = None) -> None:
+        """Строит топологический порядок и распространяет градиент назад."""
+        if not self.requires_grad:
+            raise RuntimeError("backward() вызван для Tensor без requires_grad")
+        if gradient is None:
+            if self.numel != 1:
+                raise ValueError("для нескалярного Tensor требуется явный gradient")
+            initial: Sequence[float] = [1.0]
+        elif isinstance(gradient, Tensor):
+            initial = gradient.data
+        elif isinstance(gradient, (int, float)):
+            initial = [float(gradient)]
+        else:
+            initial = gradient
+        if len(initial) != self.numel:
+            raise ValueError("размер начального градиента не совпадает с Tensor")
+
+        order: list[Tensor] = []
+        visited: set[int] = set()
+
+        def visit(node: Tensor) -> None:
+            identity = id(node)
+            if identity in visited:
+                return
+            visited.add(identity)
+            for parent in node.parents:
+                visit(parent)
+            order.append(node)
+
+        visit(self)
+        self._accumulate_grad(initial)
+        for node in reversed(order):
+            if node._backward_fn is not None and node.grad is not None:
+                node._backward_fn()
+
+    @staticmethod
+    def _coerce(value: Any) -> "Tensor":
+        if isinstance(value, Tensor):
+            return value
+        if isinstance(value, (int, float)):
+            return Tensor([float(value)], ())
+        raise TypeError(f"операция Tensor не поддерживает {type(value).__name__}")
+
+    def _binary(
+        self, other: Any, forward: Callable[[float, float], float],
+        grad_left: Callable[[float, float], float], grad_right: Callable[[float, float], float],
+        operation: str,
+    ) -> "Tensor":
+        right = self._coerce(other)
+        output_shape = _broadcast_shape(self.shape, right.shape)
+        output_size = _product(output_shape)
+        left_map: list[int] = []
+        right_map: list[int] = []
+        values = array("f")
+        for flat in range(output_size):
+            coords = _unravel(flat, output_shape)
+            left_index = _broadcast_index(coords, self.shape)
+            right_index = _broadcast_index(coords, right.shape)
+            left_map.append(left_index)
+            right_map.append(right_index)
+            values.append(forward(self.data[left_index], right.data[right_index]))
+        requires_grad = self.requires_grad or right.requires_grad
+        output = Tensor(values, output_shape, requires_grad=requires_grad, parents=(self, right), operation=operation)
+
+        def backward_fn() -> None:
+            assert output.grad is not None
+            if self.requires_grad:
+                grad = array("f", [0.0]) * self.numel
+                for i, upstream in enumerate(output.grad):
+                    grad[left_map[i]] += upstream * grad_left(self.data[left_map[i]], right.data[right_map[i]])
+                self._accumulate_grad(grad)
+            if right.requires_grad:
+                grad = array("f", [0.0]) * right.numel
+                for i, upstream in enumerate(output.grad):
+                    grad[right_map[i]] += upstream * grad_right(self.data[left_map[i]], right.data[right_map[i]])
+                right._accumulate_grad(grad)
+
+        output._backward_fn = backward_fn if requires_grad else None
+        return output
+
+    def __add__(self, other: Any) -> "Tensor":
+        return self._binary(other, lambda a, b: a + b, lambda _a, _b: 1.0, lambda _a, _b: 1.0, "add")
+
+    def __radd__(self, other: Any) -> "Tensor":
+        return self + other
+
+    def __sub__(self, other: Any) -> "Tensor":
+        return self._binary(other, lambda a, b: a - b, lambda _a, _b: 1.0, lambda _a, _b: -1.0, "sub")
+
+    def __rsub__(self, other: Any) -> "Tensor":
+        return self._coerce(other) - self
+
+    def __mul__(self, other: Any) -> "Tensor":
+        return self._binary(other, lambda a, b: a * b, lambda _a, b: b, lambda a, _b: a, "mul")
+
+    def __rmul__(self, other: Any) -> "Tensor":
+        return self * other
+
+    def __truediv__(self, other: Any) -> "Tensor":
+        return self._binary(
+            other, lambda a, b: a / b, lambda _a, b: 1.0 / b,
+            lambda a, b: -a / (b * b), "div",
+        )
+
+    def __rtruediv__(self, other: Any) -> "Tensor":
+        return self._coerce(other) / self
+
+    def __neg__(self) -> "Tensor":
+        return self * -1.0
+
+    def _unary(
+        self, forward: Callable[[float], float], derivative: Callable[[float, float], float], operation: str,
+    ) -> "Tensor":
+        output = Tensor(
+            (forward(value) for value in self.data), self.shape,
+            requires_grad=self.requires_grad, parents=(self,), operation=operation,
+        )
+
+        def backward_fn() -> None:
+            assert output.grad is not None
+            self._accumulate_grad(array("f", (
+                output.grad[i] * derivative(self.data[i], output.data[i]) for i in range(self.numel)
+            )))
+
+        output._backward_fn = backward_fn if self.requires_grad else None
+        return output
+
+    def exp(self) -> "Tensor":
+        """Поэлементная экспонента."""
+        return self._unary(math.exp, lambda _x, y: y, "exp")
+
+    def log(self) -> "Tensor":
+        """Поэлементный натуральный логарифм."""
+        return self._unary(math.log, lambda x, _y: 1.0 / x, "log")
+
+    def sqrt(self) -> "Tensor":
+        """Поэлементный квадратный корень."""
+        return self._unary(math.sqrt, lambda _x, y: 0.5 / y, "sqrt")
+
+    def relu(self) -> "Tensor":
+        """Поэлементная функция max(0, x)."""
+        return self._unary(lambda x: x if x > 0.0 else 0.0, lambda x, _y: 1.0 if x > 0.0 else 0.0, "relu")
+
+    def reshape(self, *shape: int | Sequence[int]) -> "Tensor":
+        """Меняет форму без изменения порядка элементов."""
+        requested: Sequence[int]
+        if len(shape) == 1 and not isinstance(shape[0], int):
+            requested = shape[0]
+        else:
+            requested = shape  # type: ignore[assignment]
+        normalized = _normalize_shape(requested, self.numel)
+        output = Tensor(
+            self.data, normalized, requires_grad=self.requires_grad,
+            parents=(self,), operation="reshape",
+        )
+
+        def backward_fn() -> None:
+            assert output.grad is not None
+            self._accumulate_grad(output.grad)
+
+        output._backward_fn = backward_fn if self.requires_grad else None
+        return output
+
+    def permute(self, axes: Sequence[int]) -> "Tensor":
+        """Переставляет оси и создаёт непрерывную копию."""
+        normalized = tuple(axis + self.ndim if axis < 0 else axis for axis in axes)
+        if sorted(normalized) != list(range(self.ndim)):
+            raise ValueError("axes должны быть перестановкой всех осей")
+        output_shape = tuple(self.shape[axis] for axis in normalized)
+        inverse = [normalized.index(axis) for axis in range(self.ndim)]
+        source_indices: list[int] = []
+        values = array("f")
+        for flat in range(self.numel):
+            out_coords = _unravel(flat, output_shape)
+            source_coords = [out_coords[inverse[axis]] for axis in range(self.ndim)]
+            source_index = _ravel(source_coords, self.strides)
+            source_indices.append(source_index)
+            values.append(self.data[source_index])
+        output = Tensor(
+            values, output_shape, requires_grad=self.requires_grad,
+            parents=(self,), operation="permute",
+        )
+
+        def backward_fn() -> None:
+            assert output.grad is not None
+            grad = array("f", [0.0]) * self.numel
+            for out_index, source_index in enumerate(source_indices):
+                grad[source_index] += output.grad[out_index]
+            self._accumulate_grad(grad)
+
+        output._backward_fn = backward_fn if self.requires_grad else None
+        return output
+
+    def transpose(self, dim0: int = -2, dim1: int = -1) -> "Tensor":
+        """Меняет местами две оси и создаёт непрерывную копию."""
+        dim0 = dim0 + self.ndim if dim0 < 0 else dim0
+        dim1 = dim1 + self.ndim if dim1 < 0 else dim1
+        if not 0 <= dim0 < self.ndim or not 0 <= dim1 < self.ndim:
+            raise ValueError("ось transpose вне диапазона")
+        axes = list(range(self.ndim))
+        axes[dim0], axes[dim1] = axes[dim1], axes[dim0]
+        return self.permute(axes)
+
+    @property
+    def T(self) -> "Tensor":
+        """Транспонирует последние две оси."""
+        if self.ndim < 2:
+            raise ValueError("T требует минимум две оси")
+        return self.transpose(-2, -1)
+
+    def sum(self, axis: int | None = None, *, keepdims: bool = False) -> "Tensor":
+        """Суммирует все элементы либо одну указанную ось."""
+        if axis is None:
+            output_shape = (1,) * self.ndim if keepdims else ()
+            output = Tensor([sum(self.data)], output_shape, requires_grad=self.requires_grad, parents=(self,), operation="sum")
+            groups = [0] * self.numel
+        else:
+            axis = axis + self.ndim if axis < 0 else axis
+            if not 0 <= axis < self.ndim:
+                raise ValueError("ось sum вне диапазона")
+            output_shape_list = list(self.shape)
+            if keepdims:
+                output_shape_list[axis] = 1
+            else:
+                output_shape_list.pop(axis)
+            output_shape = tuple(output_shape_list)
+            values = array("f", [0.0]) * _product(output_shape)
+            groups = []
+            output_strides = _contiguous_strides(output_shape)
+            for flat, value in enumerate(self.data):
+                coords = _unravel(flat, self.shape)
+                if keepdims:
+                    coords[axis] = 0
+                else:
+                    coords.pop(axis)
+                group = _ravel(coords, output_strides)
+                groups.append(group)
+                values[group] += value
+            output = Tensor(values, output_shape, requires_grad=self.requires_grad, parents=(self,), operation="sum")
+
+        def backward_fn() -> None:
+            assert output.grad is not None
+            self._accumulate_grad(array("f", (output.grad[group] for group in groups)))
+
+        output._backward_fn = backward_fn if self.requires_grad else None
+        return output
+
+    def mean(self, axis: int | None = None, *, keepdims: bool = False) -> "Tensor":
+        """Вычисляет среднее всех элементов либо одной оси."""
+        divisor = self.numel if axis is None else self.shape[axis % self.ndim]
+        if divisor == 0:
+            raise ValueError("mean пустого Tensor не определён")
+        return self.sum(axis, keepdims=keepdims) / float(divisor)
+
+    def matmul(self, right: "Tensor") -> "Tensor":
+        """Умножает 2D или одинаково батчированные матрицы по последним осям."""
+        if not isinstance(right, Tensor):
+            raise TypeError("matmul ожидает Tensor")
+        if self.ndim < 2 or right.ndim < 2:
+            raise ValueError("matmul требует Tensor минимум с двумя осями")
+        if self.shape[-1] != right.shape[-2]:
+            raise ValueError(f"matmul: внутренние размеры не совпадают: {self.shape} и {right.shape}")
+        left_leading, right_leading = self.shape[:-2], right.shape[:-2]
+        if left_leading != right_leading:
+            raise ValueError("matmul первой версии требует одинаковые batch-размеры")
+        batches = _product(left_leading) if left_leading else 1
+        rows, inner, columns = self.shape[-2], self.shape[-1], right.shape[-1]
+        if batches == 1:
+            values = backend_python.matmul(self.data, right.data, rows, inner, columns)
+        else:
+            values = backend_python.batched_matmul(self.data, right.data, batches, rows, inner, columns)
+        output_shape = (*left_leading, rows, columns)
+        requires_grad = self.requires_grad or right.requires_grad
+        output = Tensor(values, output_shape, requires_grad=requires_grad, parents=(self, right), operation="matmul")
+
+        def backward_fn() -> None:
+            assert output.grad is not None
+            left_matrix = rows * inner
+            right_matrix = inner * columns
+            out_matrix = rows * columns
+            if self.requires_grad:
+                grad_left = array("f", [0.0]) * self.numel
+            if right.requires_grad:
+                grad_right = array("f", [0.0]) * right.numel
+            for batch in range(batches):
+                lo, ro, oo = batch * left_matrix, batch * right_matrix, batch * out_matrix
+                for row in range(rows):
+                    for column in range(columns):
+                        upstream = output.grad[oo + row * columns + column]
+                        for k in range(inner):
+                            if self.requires_grad:
+                                grad_left[lo + row * inner + k] += upstream * right.data[ro + k * columns + column]
+                            if right.requires_grad:
+                                grad_right[ro + k * columns + column] += upstream * self.data[lo + row * inner + k]
+            if self.requires_grad:
+                self._accumulate_grad(grad_left)
+            if right.requires_grad:
+                right._accumulate_grad(grad_right)
+
+        output._backward_fn = backward_fn if requires_grad else None
+        return output
+
+    def __matmul__(self, right: "Tensor") -> "Tensor":
+        return self.matmul(right)
+
+    def batched_matmul(self, right: "Tensor") -> "Tensor":
+        """Явный псевдоним matmul для батчированных матриц."""
+        return self.matmul(right)
+
+    def softmax(self, axis: int = -1) -> "Tensor":
+        """Вычисляет стабильный softmax по последней оси."""
+        axis = axis + self.ndim if axis < 0 else axis
+        if axis != self.ndim - 1:
+            raise ValueError("softmax первой версии поддерживает только последнюю ось")
+        columns = self.shape[-1]
+        rows = self.numel // columns
+        values = backend_python.softmax_rows(self.data, rows, columns)
+        output = Tensor(values, self.shape, requires_grad=self.requires_grad, parents=(self,), operation="softmax")
+
+        def backward_fn() -> None:
+            assert output.grad is not None
+            grad = array("f", [0.0]) * self.numel
+            for row in range(rows):
+                offset = row * columns
+                dot = sum(output.grad[offset + c] * output.data[offset + c] for c in range(columns))
+                for column in range(columns):
+                    grad[offset + column] = output.data[offset + column] * (output.grad[offset + column] - dot)
+            self._accumulate_grad(grad)
+
+        output._backward_fn = backward_fn if self.requires_grad else None
+        return output
+
+    def embedding(self, indices: Sequence[int]) -> "Tensor":
+        """Выбирает строки таблицы формы (vocab, embedding)."""
+        if self.ndim != 2:
+            raise ValueError("embedding ожидает таблицу с двумя осями")
+        rows, width = self.shape
+        checked = [int(index) for index in indices]
+        if any(index < 0 or index >= rows for index in checked):
+            raise IndexError("индекс embedding вне словаря")
+        values = array("f")
+        for index in checked:
+            values.extend(self.data[index * width:(index + 1) * width])
+        output = Tensor(
+            values, (len(checked), width), requires_grad=self.requires_grad,
+            parents=(self,), operation="embedding",
+        )
+
+        def backward_fn() -> None:
+            assert output.grad is not None
+            grad = array("f", [0.0]) * self.numel
+            for position, index in enumerate(checked):
+                for column in range(width):
+                    grad[index * width + column] += output.grad[position * width + column]
+            self._accumulate_grad(grad)
+
+        output._backward_fn = backward_fn if self.requires_grad else None
+        return output
+
+    def cross_entropy(self, targets: Sequence[int]) -> "Tensor":
+        """Средняя cross-entropy для logits формы (..., classes)."""
+        if self.ndim < 2:
+            raise ValueError("cross_entropy ожидает logits минимум с двумя осями")
+        classes = self.shape[-1]
+        rows = self.numel // classes
+        checked = [int(target) for target in targets]
+        if len(checked) != rows:
+            raise ValueError(f"ожидалось {rows} target, получено {len(checked)}")
+        if any(target < 0 or target >= classes for target in checked):
+            raise IndexError("target вне диапазона классов")
+        probabilities = backend_python.softmax_rows(self.data, rows, classes)
+        loss = 0.0
+        for row, target in enumerate(checked):
+            loss -= math.log(max(float(probabilities[row * classes + target]), 1e-30))
+        output = Tensor([loss / rows], (), requires_grad=self.requires_grad, parents=(self,), operation="cross_entropy")
+
+        def backward_fn() -> None:
+            assert output.grad is not None
+            grad = array("f", probabilities)
+            for row, target in enumerate(checked):
+                grad[row * classes + target] -= 1.0
+            scale = output.grad[0] / rows
+            for i in range(len(grad)):
+                grad[i] *= scale
+            self._accumulate_grad(grad)
+
+        output._backward_fn = backward_fn if self.requires_grad else None
+        return output
+

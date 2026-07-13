@@ -6,14 +6,17 @@
 - Добавлены Conda-окружение, setup-скрипт, лицензия и начальная документация.
 - Реализован UTF-8 byte-level токенизатор с 260 токенами.
 - Добавлены 30 исходных QA-пар, варианты формулировок и детерминированное разделение.
+- Реализован непрерывный float32 Tensor, reshape/transpose, broadcasting,
+  редукции, matmul/batched matmul, softmax и базовые нелинейности.
+- Добавлен эталонный набор Python-ядер без внешних зависимостей.
 
 ## Сейчас выполняется
 
-- Этап 2: float32 Tensor и эталонные Python-операции.
+- Этап 3: численная проверка autograd, Linear и SGD.
 
 ## Осталось
 
-- Tensor/autograd, C++ backend, Transformer, обучение, checkpoint и генерация.
+- Autograd-проверки, C++ backend, Transformer, обучение, checkpoint и генерация.
 
 ## Известные проблемы
 
@@ -22,4 +25,5 @@
 ## Последний результат тестов
 
 - `python -m unittest tests.test_tokenizer -v`: 7 тестов, OK.
+- `python -m unittest tests.test_tensor tests.test_tokenizer -v`: 16 тестов, OK.
 - `python tools/make_dataset.py`: train=76, validation=14.
