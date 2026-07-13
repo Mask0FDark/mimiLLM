@@ -16,7 +16,9 @@ Int64Pointer = ctypes.POINTER(ctypes.c_int64)
 
 
 def default_library_path() -> Path:
-    explicit = os.environ.get("MIMILLM_BACKEND_LIBRARY")
+    explicit = os.environ.get("MIMILLM_BACKEND_LIBRARY") or os.environ.get(
+        "MIMILLM_CPP_LIBRARY"
+    )
     if explicit:
         return Path(explicit).expanduser().resolve()
     if sys.platform == "win32":
@@ -27,7 +29,7 @@ def default_library_path() -> Path:
         name = "libmimillm_backend.so"
     package_native = Path(__file__).resolve().parent / "_native" / name
     source_build = Path(__file__).resolve().parents[1] / "build" / name
-    return package_native if package_native.is_file() else source_build
+    return source_build if source_build.is_file() else package_native
 
 
 class CppBackend:

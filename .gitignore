@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.so
 *.dll
+!mimillm/_native/mimillm_backend.dll
 *.dylib
 *.egg-info/
 .pytest_cache/

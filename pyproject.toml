@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "mimillm"
-version = "0.3.0"
+version = "0.3.1"
 description = "An educational, dependency-free toolkit for building decoder-only language models"
 readme = "README.md"
 requires-python = ">=3.12"

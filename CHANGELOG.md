@@ -1,5 +1,15 @@
 # Changelog / История изменений
 
+## 0.3.1 — 2026-07-13
+
+- Windows x64 packages now include the threaded C++ backend automatically.
+- A normal pip installation no longer requires a separate compiler or backend build step on Windows.
+- Source checkouts prefer a freshly built library from `build/`, while installed packages use the bundled DLL.
+
+- В пакет для Windows x64 теперь автоматически входит многопоточный C++ backend.
+- После обычной установки через pip больше не требуется отдельно ставить компилятор и собирать DLL.
+- При работе с исходниками используется свежая библиотека из `build/`, а установленный пакет загружает вложенную DLL.
+
 ## 0.3.0 — 2026-07-13
 
 - Added standard `config.json` + `model.safetensors` model directories.
