@@ -1,54 +1,49 @@
-# Состояние проекта m0fdii
+# Состояние проекта mimiLLM / m0fdii
 
 ## Готово
 
-- Создан Git-репозиторий и базовая структура проекта.
-- Добавлены Conda-окружение, setup-скрипт, лицензия и начальная документация.
-- Реализован UTF-8 byte-level токенизатор с 260 токенами.
-- Добавлены 30 исходных QA-пар, варианты формулировок и детерминированное разделение.
-- Реализован непрерывный float32 Tensor, reshape/transpose, broadcasting,
-  редукции, matmul/batched matmul, softmax и базовые нелинейности.
-- Добавлен эталонный набор Python-ядер без внешних зависимостей.
-- Autograd проверен центральными конечными разностями для broadcasting,
-  matmul, ReLU, cross-entropy, embedding и Linear.
-- Реализованы Parameter, Module, Linear, ReLU, SGD и clipping общей нормы.
-- Собран Linux x86-64 C++20 backend через C ABI/ctypes; Python fallback сохранён.
-- Реализованы kernels matmul/batched matmul/softmax/ReLU/embedding/CE/AdamW
-  и постоянный std::thread pool.
-- Добавлены Embedding, RMSNorm, causal multi-head attention, pre-norm блок и
-  настраиваемый DecoderTransformer с обучаемыми позициями.
-- Реализованы AdamW, token dataset, warmup/decay, train/validation, аварийное
-  сохранение и безопасный бинарный checkpoint с полным resume.
-- Добавлены greedy/temperature/top-k генерация, EOS stopping и терминальный чат
-  с командами; ответы всегда порождаются logits модели.
-- Добавлен benchmark Python/C++ 1/несколько потоков, forward и training step;
-  код проверен на отсутствие x86 intrinsics, assembly и `-march=native` по умолчанию.
+- Реализована маленькая decoder-only Transformer с UTF-8 byte tokenizer.
+- Реализованы собственные непрерывные float32 Tensor, динамический autograd,
+  Parameter/Module, слои, causal attention, SGD и AdamW без внешних библиотек.
+- Добавлен переносимый C++20 backend через стабильный C ABI/ctypes: elementwise,
+  matmul/batched matmul, softmax, ReLU, embedding, cross-entropy и AdamW.
+- Исправлена синхронизация постоянного `std::thread` pool и добавлен stress test.
+- Работают train/validation, gradient clipping, warmup/decay, атомарный бинарный
+  checkpoint, полное resume, generation и интерактивный chat.
+- QA-примеры выбираются как отдельные последовательности, поэтому модель видит
+  соответствие полного вопроса началу ответа, а не случайные куски общего файла.
+- Добавлено смешанное обучение на QA и обычных UTF-8 `.txt`/`.md`/`.text`
+  документах. `text_ratio` управляет долей text batch; train и validation
+  корпуса разделены; в логе указывается источник каждого шага.
+- В репозитории есть небольшой русский и английский text-корпус для проверки.
+  Внешние каталоги подключаются повторяющимися аргументами CLI.
+- Добавлены Windows Conda/MinGW и Linux Conda окружения, PowerShell/bash setup,
+  benchmark, инспектор checkpoint, упаковщик исходного ZIP и подробная документация.
 
-## Сейчас выполняется
+## Проверенные платформы
 
-- Этап 9: полный тестовый прогон, QA/debug запуск и финальная документация.
+- Windows 11 x86-64, Conda Python 3.12, MinGW-w64 GCC 15.2: release DLL собрана,
+  61/61 тестов прошли с C++ backend и 61/61 с Python fallback.
+- WSL Ubuntu x86-64, Python 3.12, GCC 13.3: release `.so` собрана, 61/61 тестов
+  прошли с C++ backend.
+- Linux AArch64 поддерживается переносимым исходным кодом и флагами, но в этой
+  сессии физическая ARM64-машина не была доступна для запуска.
 
-## Осталось
+## Результаты обучения
 
-- Финальная документация, полный прогон и короткое QA-обучение.
+- QA-обучение до шага 1000: train loss на последнем шаге `1.19328`,
+  QA validation loss `1.07530`.
+- Смешанный debug run (QA + русский/английский текст): train loss
+  `5.48604 → 5.13350`, weighted validation loss `5.34125 → 5.32229` за 4 шага.
+- Продолжение демонстрационного checkpoint на смешанном корпусе выполняется
+  отдельно; checkpoint и логи исключены из Git и исходного релиза.
 
-## Известные проблемы
+## Известные ограничения
 
-- В установленном WSL Ubuntu пока не найден системный C++ компилятор.
-
-## Последний результат тестов
-
-- `python -m unittest tests.test_tokenizer -v`: 7 тестов, OK.
-- `python -m unittest tests.test_tensor tests.test_tokenizer -v`: 16 тестов, OK.
-- `python -m unittest tests.test_autograd tests.test_layers tests.test_optimizer -v`:
-  12 тестов, OK; все численные gradient checks прошли.
-- WSL Linux: release `.so` собрана GCC 13; `tests.test_cpp_backend`: 7 тестов, OK.
-- `tests.test_transformer tests.test_layers tests.test_autograd`: 16 тестов, OK;
-  causal mask доказана сравнением logits до изменённой будущей позиции.
-- AdamW/checkpoint/training smoke: 7 тестов, OK; фиксированный batch loss
-  снизился более чем на 60%, resume выполнил следующий шаг.
-- Debug training: train loss 5.56502 → 5.26042, validation loss 5.32062.
-- Generation: 3 теста, OK; интерактивный запуск и корректный `/exit` проверены.
-- Linux benchmark 64×64: Python 0.024898 s, C++/1 поток 0.000149 s,
-  C++/4 потока 0.000360 s (малый размер не окупает thread-pool overhead).
-- `python tools/make_dataset.py`: train=76, validation=14.
+- Модель на 122 948 параметров и демонстрационный корпус показывают механизм,
+  но пока не дают качество современной LLM и не должны описываться как ChatGPT.
+- Для реального изучения языков нужны существенно больший проверенный корпус,
+  больше контекст, параметров, шагов и вычислений.
+- MinGW Conda для Windows не содержит runtime ASan/UBSan; Windows debug build
+  использует символы и проверки компилятора без санитайзеров. Linux debug build
+  поддерживает ASan/UBSan.

@@ -1,0 +1,7 @@
+name: minillm
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - gxx_win-64=15.2
+  - git

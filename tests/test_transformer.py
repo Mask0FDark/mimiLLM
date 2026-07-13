@@ -59,6 +59,8 @@ class TransformerTests(unittest.TestCase):
             TransformerConfig(d_model=10, n_heads=3)
         with self.assertRaisesRegex(ValueError, "vocab_size"):
             TransformerConfig(vocab_size=100)
+        with self.assertRaisesRegex(ValueError, "text_ratio"):
+            TransformerConfig(text_ratio=1.1)
 
 
 if __name__ == "__main__":

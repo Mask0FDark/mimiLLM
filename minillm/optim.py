@@ -89,6 +89,21 @@ class AdamW(Optimizer):
 
     def step(self) -> None:
         self.step_count += 1
+        from .backend import get_backend
+
+        selected_backend = get_backend()
+        if hasattr(selected_backend, "adamw_update"):
+            for parameter, first, second in zip(
+                self.parameters, self.first_moments, self.second_moments
+            ):
+                if parameter.grad is not None:
+                    selected_backend.adamw_update(
+                        parameter.data, parameter.grad, first, second,
+                        learning_rate=self.learning_rate, beta1=self.beta1,
+                        beta2=self.beta2, epsilon=self.epsilon,
+                        weight_decay=self.weight_decay, step=self.step_count,
+                    )
+            return
         correction1 = 1.0 - self.beta1 ** self.step_count
         correction2 = 1.0 - self.beta2 ** self.step_count
         for parameter, first, second in zip(

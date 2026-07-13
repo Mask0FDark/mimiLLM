@@ -1,0 +1,7 @@
+Language lets people describe the world, preserve knowledge, and share experience. The meaning of a sentence depends on words, order, grammar, and context. A language model studies these connections by repeatedly predicting what comes next.
+
+The town wakes slowly in the morning. Windows open, people enter the streets, and buses begin their familiar routes. In the evening the pace becomes quieter, lamps turn on, and families return home.
+
+An investigation often starts with a question. A researcher collects evidence, tests an idea, and compares the result with the expectation. An error is useful information because it points to the part of an explanation that needs more work.
+
+A program is easier to understand when it is built from small parts. Tests describe expected behavior, documentation explains intent, and version control keeps a history of changes.

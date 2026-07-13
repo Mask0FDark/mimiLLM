@@ -79,6 +79,24 @@ def _broadcast_index(output_coords: Sequence[int], source_shape: Sequence[int]) 
     return _ravel(coords, _contiguous_strides(source_shape))
 
 
+def _broadcast_map(source_shape: Sequence[int], output_shape: Sequence[int]) -> list[int]:
+    """Строит карту один раз, ускоряя частые scalar/bias/leading broadcasts."""
+    output_size = _product(output_shape)
+    if tuple(source_shape) == tuple(output_shape):
+        return list(range(output_size))
+    if _product(source_shape) == 1:
+        return [0] * output_size
+    padded = (1,) * (len(output_shape) - len(source_shape)) + tuple(source_shape)
+    first_value = next((index for index, dimension in enumerate(padded) if dimension != 1), len(padded))
+    if all(dimension == 1 for dimension in padded[:first_value]) and padded[first_value:] == tuple(output_shape[first_value:]):
+        source_size = _product(source_shape)
+        return [index % source_size for index in range(output_size)]
+    result: list[int] = []
+    for flat in range(output_size):
+        result.append(_broadcast_index(_unravel(flat, output_shape), source_shape))
+    return result
+
+
 class Tensor:
     """Плотный float32-тензор с данными и локальной backward-функцией.
 
@@ -257,16 +275,20 @@ class Tensor:
         right = self._coerce(other)
         output_shape = _broadcast_shape(self.shape, right.shape)
         output_size = _product(output_shape)
-        left_map: list[int] = []
-        right_map: list[int] = []
-        values = array("f")
-        for flat in range(output_size):
-            coords = _unravel(flat, output_shape)
-            left_index = _broadcast_index(coords, self.shape)
-            right_index = _broadcast_index(coords, right.shape)
-            left_map.append(left_index)
-            right_map.append(right_index)
-            values.append(forward(self.data[left_index], right.data[right_index]))
+        left_map = _broadcast_map(self.shape, output_shape)
+        right_map = _broadcast_map(right.shape, output_shape)
+        selected_backend = get_backend()
+        if self.shape == right.shape == output_shape and operation == "add":
+            values = selected_backend.add(self.data, right.data)
+        elif self.shape == right.shape == output_shape and operation == "mul":
+            values = selected_backend.multiply(self.data, right.data)
+        elif operation == "mul" and right.numel == 1 and self.shape == output_shape:
+            values = selected_backend.scalar_multiply(self.data, right.data[0])
+        else:
+            values = array("f", (
+                forward(self.data[left_map[flat]], right.data[right_map[flat]])
+                for flat in range(output_size)
+            ))
         requires_grad = self.requires_grad or right.requires_grad
         output = Tensor(values, output_shape, requires_grad=requires_grad, parents=(self, right), operation=operation)
 
@@ -347,7 +369,18 @@ class Tensor:
 
     def relu(self) -> "Tensor":
         """Поэлементная функция max(0, x)."""
-        return self._unary(lambda x: x if x > 0.0 else 0.0, lambda x, _y: 1.0 if x > 0.0 else 0.0, "relu")
+        selected_backend = get_backend()
+        output = Tensor(
+            selected_backend.relu(self.data), self.shape,
+            requires_grad=self.requires_grad, parents=(self,), operation="relu",
+        )
+
+        def backward_fn() -> None:
+            assert output.grad is not None
+            self._accumulate_grad(selected_backend.relu_backward(self.data, output.grad))
+
+        output._backward_fn = backward_fn if self.requires_grad else None
+        return output
 
     def reshape(self, *shape: int | Sequence[int]) -> "Tensor":
         """Меняет форму без изменения порядка элементов."""
@@ -487,24 +520,42 @@ class Tensor:
             assert output.grad is not None
             left_matrix = rows * inner
             right_matrix = inner * columns
-            out_matrix = rows * columns
+            selected_backend = get_backend()
             if self.requires_grad:
-                grad_left = array("f", [0.0]) * self.numel
-            if right.requires_grad:
-                grad_right = array("f", [0.0]) * right.numel
-            for batch in range(batches):
-                lo, ro, oo = batch * left_matrix, batch * right_matrix, batch * out_matrix
-                for row in range(rows):
-                    for column in range(columns):
-                        upstream = output.grad[oo + row * columns + column]
-                        for k in range(inner):
-                            if self.requires_grad:
-                                grad_left[lo + row * inner + k] += upstream * right.data[ro + k * columns + column]
-                            if right.requires_grad:
-                                grad_right[ro + k * columns + column] += upstream * self.data[lo + row * inner + k]
-            if self.requires_grad:
+                right_transposed = array("f", [0.0]) * right.numel
+                for batch in range(batches):
+                    offset = batch * right_matrix
+                    for k in range(inner):
+                        for column in range(columns):
+                            right_transposed[offset + column * inner + k] = right.data[
+                                offset + k * columns + column
+                            ]
+                if batches == 1:
+                    grad_left = selected_backend.matmul(
+                        output.grad, right_transposed, rows, columns, inner
+                    )
+                else:
+                    grad_left = selected_backend.batched_matmul(
+                        output.grad, right_transposed, batches, rows, columns, inner
+                    )
                 self._accumulate_grad(grad_left)
             if right.requires_grad:
+                left_transposed = array("f", [0.0]) * self.numel
+                for batch in range(batches):
+                    offset = batch * left_matrix
+                    for row in range(rows):
+                        for k in range(inner):
+                            left_transposed[offset + k * rows + row] = self.data[
+                                offset + row * inner + k
+                            ]
+                if batches == 1:
+                    grad_right = selected_backend.matmul(
+                        left_transposed, output.grad, inner, rows, columns
+                    )
+                else:
+                    grad_right = selected_backend.batched_matmul(
+                        left_transposed, output.grad, batches, inner, rows, columns
+                    )
                 right._accumulate_grad(grad_right)
 
         output._backward_fn = backward_fn if requires_grad else None
@@ -548,9 +599,8 @@ class Tensor:
         checked = [int(index) for index in indices]
         if any(index < 0 or index >= rows for index in checked):
             raise IndexError("индекс embedding вне словаря")
-        values = array("f")
-        for index in checked:
-            values.extend(self.data[index * width:(index + 1) * width])
+        selected_backend = get_backend()
+        values = selected_backend.embedding_gather(self.data, checked, rows, width)
         output = Tensor(
             values, (len(checked), width), requires_grad=self.requires_grad,
             parents=(self,), operation="embedding",
@@ -558,10 +608,9 @@ class Tensor:
 
         def backward_fn() -> None:
             assert output.grad is not None
-            grad = array("f", [0.0]) * self.numel
-            for position, index in enumerate(checked):
-                for column in range(width):
-                    grad[index * width + column] += output.grad[position * width + column]
+            grad = selected_backend.embedding_scatter_add(
+                checked, output.grad, rows, width
+            )
             self._accumulate_grad(grad)
 
         output._backward_fn = backward_fn if self.requires_grad else None
@@ -578,18 +627,18 @@ class Tensor:
             raise ValueError(f"ожидалось {rows} target, получено {len(checked)}")
         if any(target < 0 or target >= classes for target in checked):
             raise IndexError("target вне диапазона классов")
-        probabilities = get_backend().softmax_rows(self.data, rows, classes)
-        loss = 0.0
-        for row, target in enumerate(checked):
-            loss -= math.log(max(float(probabilities[row * classes + target]), 1e-30))
-        output = Tensor([loss / rows], (), requires_grad=self.requires_grad, parents=(self,), operation="cross_entropy")
+        selected_backend = get_backend()
+        loss = selected_backend.cross_entropy(self.data, checked, rows, classes)
+        base_gradient = selected_backend.cross_entropy_backward(
+            self.data, checked, rows, classes
+        ) if self.requires_grad else None
+        output = Tensor([loss], (), requires_grad=self.requires_grad, parents=(self,), operation="cross_entropy")
 
         def backward_fn() -> None:
             assert output.grad is not None
-            grad = array("f", probabilities)
-            for row, target in enumerate(checked):
-                grad[row * classes + target] -= 1.0
-            scale = output.grad[0] / rows
+            assert base_gradient is not None
+            grad = array("f", base_gradient)
+            scale = output.grad[0]
             for i in range(len(grad)):
                 grad[i] *= scale
             self._accumulate_grad(grad)

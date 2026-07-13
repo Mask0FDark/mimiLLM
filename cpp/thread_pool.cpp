@@ -1,7 +1,6 @@
 #include "thread_pool.h"
 
 #include <algorithm>
-#include <atomic>
 #include <memory>
 #include <stdexcept>
 
@@ -67,7 +66,7 @@ void ThreadPool::parallel_for(
     struct Completion {
         std::mutex mutex;
         std::condition_variable condition;
-        std::atomic<std::int64_t> remaining{0};
+        std::int64_t remaining{0};
         std::exception_ptr error;
     };
     auto completion = std::make_shared<Completion>();
@@ -85,7 +84,11 @@ void ThreadPool::parallel_for(
                     std::lock_guard error_lock(completion->mutex);
                     if (!completion->error) completion->error = std::current_exception();
                 }
-                if (--completion->remaining == 0) completion->condition.notify_one();
+                {
+                    std::lock_guard completion_lock(completion->mutex);
+                    --completion->remaining;
+                    if (completion->remaining == 0) completion->condition.notify_one();
+                }
             });
         }
     }
@@ -101,4 +104,3 @@ ThreadPool& global_thread_pool() {
 }
 
 }  // namespace minillm
-

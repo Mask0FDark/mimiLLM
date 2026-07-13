@@ -33,6 +33,7 @@ class TransformerConfig:
     validation_interval: int = 20
     checkpoint_interval: int = 50
     seed: int = 42
+    text_ratio: float = 0.5
 
     def __post_init__(self) -> None:
         integer_positive = (
@@ -48,6 +49,8 @@ class TransformerConfig:
             raise ValueError("d_model должен делиться на n_heads")
         if self.learning_rate <= 0.0 or self.weight_decay < 0.0:
             raise ValueError("learning_rate > 0, weight_decay >= 0")
+        if not 0.0 <= self.text_ratio <= 1.0:
+            raise ValueError("text_ratio должен быть от 0 до 1")
         if self.warmup_steps < 0 or self.validation_interval <= 0 or self.checkpoint_interval <= 0:
             raise ValueError("интервалы должны быть положительными, warmup_steps >= 0")
 
@@ -135,4 +138,3 @@ class DecoderTransformer(Module):
     def parameter_count(self) -> int:
         """Число обучаемых float32-параметров."""
         return sum(parameter.numel for parameter in self.parameters())
-

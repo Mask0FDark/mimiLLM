@@ -97,3 +97,57 @@ def relu_backward(values: Sequence[float], grad_output: Sequence[float]) -> arra
         grad_output[i] if values[i] > 0.0 else 0.0 for i in range(len(values))
     ))
 
+
+def embedding_gather(
+    table: Sequence[float], indices: Sequence[int], vocab: int, width: int,
+) -> array:
+    """Собирает строки таблицы embedding."""
+    if len(table) != vocab * width or vocab <= 0 or width <= 0:
+        raise ValueError("embedding_gather: неверная форма таблицы")
+    output = array("f")
+    for index in indices:
+        if index < 0 or index >= vocab:
+            raise IndexError("embedding index out of range")
+        output.extend(table[index * width:(index + 1) * width])
+    return output
+
+
+def embedding_scatter_add(
+    indices: Sequence[int], grad_output: Sequence[float], vocab: int, width: int,
+) -> array:
+    """Суммирует градиенты повторяющихся embedding-индексов."""
+    if len(grad_output) != len(indices) * width:
+        raise ValueError("embedding_scatter_add: неверная форма градиента")
+    output = array("f", [0.0]) * (vocab * width)
+    for row, index in enumerate(indices):
+        if index < 0 or index >= vocab:
+            raise IndexError("embedding index out of range")
+        for column in range(width):
+            output[index * width + column] += grad_output[row * width + column]
+    return output
+
+
+def cross_entropy(
+    logits: Sequence[float], targets: Sequence[int], rows: int, classes: int,
+) -> float:
+    """Вычисляет среднюю стабильную cross-entropy."""
+    probabilities = softmax_rows(logits, rows, classes)
+    if len(targets) != rows:
+        raise ValueError("cross_entropy: неверное число targets")
+    return -sum(
+        math.log(max(float(probabilities[row * classes + target]), 1e-30))
+        for row, target in enumerate(targets)
+    ) / rows
+
+
+def cross_entropy_backward(
+    logits: Sequence[float], targets: Sequence[int], rows: int, classes: int,
+) -> array:
+    """Возвращает d(mean cross-entropy)/d(logits)."""
+    output = softmax_rows(logits, rows, classes)
+    for row, target in enumerate(targets):
+        output[row * classes + target] -= 1.0
+    scale = 1.0 / rows
+    for index in range(len(output)):
+        output[index] *= scale
+    return output
