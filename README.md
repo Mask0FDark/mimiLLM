@@ -1,33 +1,53 @@
 # mimiLLM
 
-mimiLLM is a small Python library for building, training, saving, and studying decoder-only language models. Its tensor engine, automatic differentiation, Transformer layers, optimizer, tokenizer, data pipeline, and weight format are implemented directly in the project, without NumPy, PyTorch, or another ML framework.
+mimiLLM — маленькая библиотека для тех, кто хочет не просто вызвать готовую LLM, а разобраться, из каких деталей она собрана.
 
-The library is intended for learning and experiments. It can train on ordinary texts, question-answer examples, or a mixture of both. The implementation is deliberately readable; it is not a replacement for production GPU frameworks used to train billion-parameter models.
+Внутри есть собственные тензоры на `float32`, автоматическое вычисление градиентов, слои нейронной сети, causal attention, decoder-only Transformer, AdamW, токенизатор, обучение и сохранение весов. Всё это написано без NumPy, PyTorch, TensorFlow и других ML-фреймворков. Тяжёлые операции при желании можно выполнять через небольшой многопоточный C++ backend, но библиотека работает и на чистом Python.
 
-[Русская версия](#русский) · [English version](#english)
+Это не попытка заменить PyTorch и не обещание обучить ChatGPT на домашнем процессоре. mimiLLM нужна для небольших моделей, экспериментов и изучения кода, который обычно скрыт внутри больших библиотек.
 
-## Русский
+[English version](#english-version)
 
-### Установка
+## Что с ней можно сделать
 
-Python 3.12 или новее:
+- создать decoder-only Transformer своего размера;
+- обучить его на обычных текстах, вопросах и ответах или на смеси этих данных;
+- сохранить модель в папку с `config.json` и `model.safetensors`;
+- загрузить готовые веса одной функцией;
+- продолжить прерванное обучение из checkpoint;
+- переключаться между понятным Python backend и более быстрым C++ backend;
+- открыть реализацию любого шага — от умножения тензоров до attention и AdamW.
 
-```powershell
-conda create -n my-model python=3.12 -y
-conda run -n my-model python -m pip install -e E:\mimiLLM
-```
+Если хочется увидеть готовый проект модели, посмотрите [m0fdii](https://github.com/Mask0FDark/m0fdii). Там уже лежат данные, конфигурация, обученные веса и короткие скрипты запуска.
 
-После публикации библиотеку также можно установить прямо из GitHub:
+## Установка
+
+Требуется Python 3.12 или новее.
+
+Установка последней версии с GitHub:
 
 ```powershell
 python -m pip install "git+https://github.com/Mask0FDark/mimiLLM.git"
 ```
 
-Чистая Python-реализация работает на Windows и Linux. Необязательный C++ backend ускоряет основные операции на CPU.
+Если исходники уже скачаны и вы хотите менять библиотеку:
 
-### Вариант 1: загрузить готовые веса
+```powershell
+python -m pip install -e E:\mimiLLM
+```
 
-Папка готовой модели содержит два переносимых файла:
+Можно создать отдельное окружение Conda:
+
+```powershell
+conda create -n my-llm python=3.12 -y
+conda run -n my-llm python -m pip install "git+https://github.com/Mask0FDark/mimiLLM.git"
+```
+
+Сторонние runtime-зависимости библиотеке не нужны. Без собранного C++ backend автоматически используется Python.
+
+## Загрузка готовых весов
+
+Обычная папка модели выглядит так:
 
 ```text
 weights/
@@ -35,27 +55,35 @@ weights/
 └── model.safetensors
 ```
 
-Использование:
+Загрузка и генерация текста:
 
 ```python
 from mimillm import generate_text, load_model
 
 model = load_model("weights")
-continuation = generate_text(
+text = generate_text(
     model,
     "Однажды вечером",
     max_new_tokens=40,
     temperature=0.7,
     top_k=20,
 )
-print(continuation)
+print(text)
 ```
 
-Можно передать и сам файл весов: `load_model("weights/model.safetensors")`. В этом случае `config.json` должен лежать рядом. Полный запускаемый пример находится в [examples/use_weights.py](examples/use_weights.py).
+Передавать можно как папку, так и сам файл:
 
-### Вариант 2: обучить модель на своих данных
+```python
+model = load_model("weights/model.safetensors")
+```
 
-Рекомендуемая структура отдельного проекта:
+Во втором случае рядом с весами всё равно должен находиться `config.json`: по нему библиотека узнаёт размеры embedding, количество слоёв, длину контекста и остальные параметры архитектуры.
+
+Запускаемый пример: [examples/use_weights.py](examples/use_weights.py).
+
+## Обучение своей модели
+
+В отдельном проекте удобно держать конфигурацию, данные и скрипт запуска рядом:
 
 ```text
 my_model/
@@ -64,17 +92,37 @@ my_model/
 └── data/
     ├── text/
     │   ├── train/
-    │   │   └── books.txt
     │   └── validation/
-    │       └── validation.txt
     └── question/
         ├── train/
-        │   └── questions.txt
         └── validation/
-            └── questions.txt
 ```
 
-Пути задаются в `config.json`. Относительные пути считаются от каталога этого файла:
+Это не жёстко зашитая структура. Все четыре пути задаются в конфигурации и могут вести в другое место, в том числе по абсолютному пути.
+
+### Обычные тексты
+
+В `data/text/train` кладутся документы, на которых модель изучает язык через предсказание следующего токена. Поддерживаются UTF-8 файлы `.txt`, `.md` и `.text`; вложенные каталоги тоже просматриваются.
+
+В `data/text/validation` должны лежать другие документы. Они не обновляют веса, а помогают увидеть, учится ли модель работать с незнакомым текстом или просто запоминает train-набор.
+
+### Вопросы и ответы
+
+В каталогах `data/question/train` и `data/question/validation` находятся `.txt` файлы с блоками такого вида:
+
+```text
+Вопрос: Что делает attention?
+Ответ: Attention помогает модели учитывать другие токены в контексте.
+
+Вопрос: What is a token?
+Ответ: A token is a unit processed by a language model.
+```
+
+Вопрос занимает первую строку блока. Ответ может продолжаться на следующих строках до пустой строки.
+
+### Конфигурация
+
+Небольшой рабочий `config.json`:
 
 ```json
 {
@@ -100,7 +148,29 @@ my_model/
 }
 ```
 
-Минимальный `train.py`:
+Главные параметры архитектуры:
+
+- `context_length` — сколько последних токенов помещается в контекст;
+- `d_model` — размер внутреннего представления токена;
+- `n_layers` — количество Transformer-блоков;
+- `n_heads` — число attention-голов;
+- `d_mlp` — размер скрытой части feed-forward слоя.
+
+Параметры обучения:
+
+- `batch_size` и `steps` определяют объём работы;
+- `learning_rate`, `weight_decay` и `warmup_steps` управляют AdamW;
+- `validation_interval` задаёт частоту проверки validation loss;
+- `checkpoint_interval` задаёт частоту сохранения состояния;
+- `seed` делает инициализацию и выбор batch воспроизводимыми.
+
+`text_ratio` управляет смешиванием источников. При `0.0` модель учится только на вопросах и ответах, при `1.0` — только на обычных текстах. Значение `0.35` означает, что примерно 35% batch будут текстовыми.
+
+Относительные пути к данным считаются от каталога, в котором лежит `config.json`. Поэтому запуск не зависит от текущей папки терминала.
+
+### Скрипт обучения
+
+Минимальный `train.py` состоит из нескольких строк:
 
 ```python
 from pathlib import Path
@@ -109,16 +179,24 @@ from mimillm import train_from_config
 
 
 HERE = Path(__file__).resolve().parent
-result = train_from_config(HERE / "config.json", output_dir=HERE / "weights")
+result = train_from_config(
+    HERE / "config.json",
+    output_dir=HERE / "weights",
+)
+
 print(result.weights_dir)
 ```
 
-Запуск: `python train.py`. Готовый пример есть в [examples/train_model.py](examples/train_model.py). После обучения папка `weights` содержит:
+После `python train.py` в папке `weights` появятся:
 
-- `config.json` и `model.safetensors` — файлы для загрузки и распространения модели;
-- `training_checkpoint.bin` — внутреннее состояние модели и AdamW для продолжения обучения.
+```text
+weights/
+├── config.json
+├── model.safetensors
+└── training_checkpoint.bin
+```
 
-Продолжить обучение можно так:
+`config.json` и `model.safetensors` — переносимая модель для `load_model()`. В `training_checkpoint.bin` дополнительно лежат moments AdamW, номер шага и seed; этот файл нужен только для возобновления обучения.
 
 ```python
 result = train_from_config(
@@ -128,29 +206,11 @@ result = train_from_config(
 )
 ```
 
-### Форматы данных
+Полный короткий пример находится в [examples/train_model.py](examples/train_model.py).
 
-В `data/text/train` и `data/text/validation` можно класть любое число UTF-8 файлов `.txt`, `.md` и `.text`, включая вложенные каталоги. Они используются для обычного предсказания следующего токена и изучения языка.
+## Создание модели прямо в коде
 
-Файлы в `data/question/train` и `data/question/validation` используют простые блоки:
-
-```text
-Вопрос: Что такое нейронная сеть?
-Ответ: Это модель, которая обучается на примерах.
-
-Вопрос: What is a token?
-Ответ: A token is a unit processed by a language model.
-```
-
-`text_ratio` задаёт долю учебных batch из обычных текстов:
-
-- `0.0` — только вопросы и ответы;
-- `1.0` — только обычные тексты;
-- значение между ними — смешанное обучение.
-
-Train и validation должны содержать разные данные. Validation не участвует в обновлении весов и нужна для проверки переобучения.
-
-### Создать модель программно
+Конфигурацию необязательно читать из JSON:
 
 ```python
 from mimillm import ModelConfig, create_model, save_model
@@ -162,70 +222,131 @@ config = ModelConfig(
     n_heads=6,
     d_mlp=288,
 )
+
 model = create_model(config)
+print(f"Параметров: {model.parameter_count():,}")
 save_model("weights", model)
 ```
 
-### Формат весов
+Сразу после создания веса случайные. Чтобы модель генерировала осмысленный текст, её ещё нужно обучить.
 
-`model.safetensors` следует документированной структуре SafeTensors: JSON-заголовок описывает имена, формы, типы и смещения тензоров, после него идут непрерывные бинарные данные. mimiLLM записывает параметры как `F32` и может читать свои файлы без внешней зависимости. Подробнее: [официальная спецификация SafeTensors](https://github.com/huggingface/safetensors#format).
+## Как устроена библиотека
 
-Имена `config.json` и `model.safetensors` выбраны так же, как в привычных каталогах опубликованных языковых моделей. Это делает структуру понятной и пригодной для внешних инструментов, но архитектуру mimiLLM всё равно должен поддерживать загрузчик, который читает веса.
+Код разделён по небольшим модулям, чтобы путь данных можно было проследить без прыжков по огромному фреймворку:
 
-### Разработка и проверки
+```text
+mimillm/tensor.py          float32 Tensor и математические операции
+mimillm/autograd.py        граф вычислений и backward
+mimillm/layers.py          Linear, Embedding, RMSNorm и MLP
+mimillm/attention.py       causal multi-head self-attention
+mimillm/transformer.py     TransformerConfig и decoder-only модель
+mimillm/optim.py           SGD и AdamW
+mimillm/dataset.py         тексты, вопросы и формирование batch
+mimillm/training.py        полный цикл обучения
+mimillm/generation.py      авторегрессионная генерация
+mimillm/safetensors.py     чтение и запись переносимых весов
+mimillm/checkpoint.py      checkpoint для продолжения обучения
+```
+
+Токенизатор byte-level: значения `0–255` соответствуют байтам UTF-8, а ещё четыре значения используются для `PAD`, `BOS`, `EOS` и `SEP`. Поэтому словарь всегда содержит 260 токенов и может представить любой русский, английский или другой UTF-8 текст. Обратная сторона простоты — один Unicode-символ часто занимает несколько токенов.
+
+Transformer использует pre-norm блоки, causal mask, обучаемые позиционные embedding и отдельную выходную проекцию. Это настоящая авторегрессионная модель: во время генерации она много раз вычисляет logits и каждый раз выбирает следующий токен.
+
+## Веса и checkpoint — не одно и то же
+
+`model.safetensors` хранит только именованные `F32` тензоры модели. Формат состоит из JSON-заголовка и непрерывного бинарного буфера и совместим с документированной [спецификацией SafeTensors](https://github.com/huggingface/safetensors#format). mimiLLM читает и записывает его собственной реализацией без внешней зависимости.
+
+`training_checkpoint.bin` — внутренний формат mimiLLM. Кроме параметров модели он содержит состояние оптимизатора и служебную информацию, поэтому занимает больше места. Для публикации готовой модели достаточно `config.json` и `model.safetensors`.
+
+## Python и C++ backend
+
+По умолчанию используется режим `auto`: если собранная библиотека найдена, тяжёлые операции выполняются в C++, иначе всё работает на Python.
+
+Сборка на Windows:
 
 ```powershell
+python tools/build_backend.py --release
+$env:MIMILLM_BACKEND = "cpp"
+```
+
+Linux или WSL:
+
+```bash
+python3 tools/build_backend.py --release
+export MIMILLM_BACKEND=cpp
+```
+
+Доступные переменные окружения:
+
+- `MIMILLM_BACKEND=auto|python|cpp` — выбор backend;
+- `MIMILLM_NUM_THREADS=N` — число рабочих потоков C++;
+- `MIMILLM_CPP_LIBRARY=/path/to/library` — явный путь к DLL или `.so`.
+
+C++ backend не меняет математику модели и не является отдельной реализацией Transformer. Он предоставляет только вычислительные kernels через стабильный C ABI, а граф модели и обучение остаются в Python.
+
+## Проверки
+
+Все тесты на Python backend:
+
+```powershell
+$env:MIMILLM_BACKEND = "python"
 python -m unittest discover -s tests -v
-python tools/build_backend.py
+```
+
+С C++ backend:
+
+```powershell
+python tools/build_backend.py --release
 $env:MIMILLM_BACKEND = "cpp"
 python -m unittest discover -s tests -v
 ```
 
-Linux/WSL:
+Тесты проверяют тензорные операции, численные градиенты, autograd, слои, attention, оптимизаторы, checkpoint, SafeTensors, генерацию, работу с данными и короткий полный цикл обучения. Проект проверялся на Windows и WSL/Linux.
 
-```bash
-python3 -m unittest discover -s tests -v
-python3 tools/build_backend.py
-MIMILLM_BACKEND=cpp python3 -m unittest discover -s tests -v
-```
+## Ограничения
 
-Полезные переменные окружения:
+- Обучение рассчитано на CPU и небольшое число параметров.
+- Byte tokenizer понятен, но менее экономен, чем современные subword-токенизаторы.
+- Нет GPU, mixed precision, distributed training и готовых оптимизированных kernels уровня BLAS/CUDA.
+- Увеличить размеры в конфигурации можно, но время и расход памяти быстро вырастут.
+- Хорошая генерация зависит прежде всего от качества и объёма данных, а не только от числа шагов.
 
-- `MIMILLM_BACKEND=auto|python|cpp` выбирает backend;
-- `MIMILLM_NUM_THREADS=N` задаёт число CPU-потоков C++ backend;
-- `MIMILLM_CPP_LIBRARY=/path/to/library` задаёт явный путь к DLL или `.so`.
+Если задача — изучить устройство небольшой LLM или проверить свою идею без большого стека зависимостей, текущих возможностей достаточно. Для обучения большой практической модели лучше использовать GPU-фреймворк, сохранив mimiLLM как понятный эталон устройства алгоритма.
 
-## English
+## English version
+
+mimiLLM is a small library for people who want to inspect a language model instead of hiding it behind a large framework. It implements float32 tensors, autograd, neural-network layers, causal attention, a decoder-only Transformer, AdamW, datasets, training, generation, checkpoints, and SafeTensors weights without NumPy, PyTorch, or another ML runtime.
+
+It is designed for education and small CPU experiments. It is not a production replacement for PyTorch and is not intended to train billion-parameter models.
 
 ### Install
 
-Use Python 3.12 or newer:
+Python 3.12 or newer is required:
 
 ```bash
 python -m pip install "git+https://github.com/Mask0FDark/mimiLLM.git"
 ```
 
-For editable local development: `python -m pip install -e E:\mimiLLM`.
+For editable local development:
 
-The Python backend runs on Windows and Linux. An optional C++ backend accelerates core CPU operations.
+```powershell
+python -m pip install -e E:\mimiLLM
+```
 
-### Option 1: load existing weights
-
-A reusable model directory contains `config.json` and `model.safetensors`:
+### Load a model
 
 ```python
 from mimillm import generate_text, load_model
 
 model = load_model("weights")
-text = generate_text(model, "Once upon a time", max_new_tokens=40)
-print(text)
+print(generate_text(model, "Once upon a time", max_new_tokens=40))
 ```
 
-`load_model("weights/model.safetensors")` is also supported when `config.json` is next to the weight file. See [examples/use_weights.py](examples/use_weights.py).
+The `weights` directory contains `config.json` and `model.safetensors`. You may also pass the `.safetensors` path directly when the config file is next to it.
 
-### Option 2: train on your own data
+### Train on your data
 
-Create these four directories next to your project config:
+Create four data directories:
 
 ```text
 data/text/train/
@@ -234,21 +355,7 @@ data/question/train/
 data/question/validation/
 ```
 
-Put UTF-8 `.txt`, `.md`, or `.text` documents in the text directories. Put `.txt` files containing `Вопрос:`/`Ответ:` blocks in the question directories. All directories are scanned recursively.
-
-Add the paths to `config.json`:
-
-```json
-{
-  "text_ratio": 0.5,
-  "text_train_path": "data/text/train",
-  "text_validation_path": "data/text/validation",
-  "question_train_path": "data/question/train",
-  "question_validation_path": "data/question/validation"
-}
-```
-
-This abbreviated JSON only highlights data fields; a real config also needs the model and training fields shown above, or can use `ModelConfig` defaults.
+Text directories accept recursive UTF-8 `.txt`, `.md`, and `.text` documents. Question directories contain `.txt` files made of `Вопрос:` and `Ответ:` blocks. Set their paths and `text_ratio` in `config.json`, then call:
 
 ```python
 from pathlib import Path
@@ -258,12 +365,17 @@ HERE = Path(__file__).resolve().parent
 result = train_from_config(HERE / "config.json", output_dir=HERE / "weights")
 ```
 
-Relative dataset paths are resolved from the directory containing `config.json`. `text_ratio=0` selects question-answer data only, `text_ratio=1` selects ordinary text only, and values in between mix both sources. See [examples/train_model.py](examples/train_model.py).
+Relative data paths are resolved from the config directory. Training exports `config.json` and `model.safetensors` for inference, plus `training_checkpoint.bin` for resuming AdamW state.
 
-Training exports `config.json` and `model.safetensors` for inference, plus `training_checkpoint.bin` for resuming AdamW state. The portable weights use the documented [SafeTensors format](https://github.com/huggingface/safetensors#format) with float32 tensors.
+See [examples/train_model.py](examples/train_model.py), [examples/use_weights.py](examples/use_weights.py), and the complete [m0fdii model project](https://github.com/Mask0FDark/m0fdii).
 
-### Scope
+### Backends and tests
 
-mimiLLM includes a byte tokenizer, tensors, autograd, layers, causal multi-head attention, a decoder-only Transformer, AdamW/SGD, mixed text and QA datasets, generation, checkpoints, SafeTensors weights, and an optional threaded C++ backend. The code favors clarity and deterministic tests over production-scale performance.
+The pure Python backend works on Windows and Linux. The optional threaded C++ backend accelerates core operations while keeping the model and training loop in Python.
 
-MIT License.
+```bash
+python tools/build_backend.py --release
+MIMILLM_BACKEND=cpp python -m unittest discover -s tests -v
+```
+
+The code favors readability and deterministic tests over production-scale performance. MIT License.
