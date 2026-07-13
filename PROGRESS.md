@@ -15,14 +15,16 @@
 - Собран Linux x86-64 C++20 backend через C ABI/ctypes; Python fallback сохранён.
 - Реализованы kernels matmul/batched matmul/softmax/ReLU/embedding/CE/AdamW
   и постоянный std::thread pool.
+- Добавлены Embedding, RMSNorm, causal multi-head attention, pre-norm блок и
+  настраиваемый DecoderTransformer с обучаемыми позициями.
 
 ## Сейчас выполняется
 
-- Этап 5: decoder-only Transformer.
+- Этап 6: AdamW, обучение, validation и checkpoint/resume.
 
 ## Осталось
 
-- Transformer, обучение, checkpoint, генерация, benchmark и финальный прогон.
+- Обучение/checkpoint, генерация, benchmark и финальный прогон.
 
 ## Известные проблемы
 
@@ -35,4 +37,6 @@
 - `python -m unittest tests.test_autograd tests.test_layers tests.test_optimizer -v`:
   12 тестов, OK; все численные gradient checks прошли.
 - WSL Linux: release `.so` собрана GCC 13; `tests.test_cpp_backend`: 7 тестов, OK.
+- `tests.test_transformer tests.test_layers tests.test_autograd`: 16 тестов, OK;
+  causal mask доказана сравнением logits до изменённой будущей позиции.
 - `python tools/make_dataset.py`: train=76, validation=14.
