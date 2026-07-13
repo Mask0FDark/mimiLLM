@@ -1,0 +1,17 @@
+{
+  "vocab_size": 260,
+  "context_length": 128,
+  "d_model": 96,
+  "n_layers": 3,
+  "n_heads": 6,
+  "d_mlp": 288,
+  "batch_size": 2,
+  "steps": 2000,
+  "learning_rate": 0.0005,
+  "weight_decay": 0.01,
+  "warmup_steps": 50,
+  "validation_interval": 50,
+  "checkpoint_interval": 100,
+  "seed": 42
+}
+

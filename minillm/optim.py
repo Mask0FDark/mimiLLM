@@ -65,3 +65,72 @@ class SGD(Optimizer):
         """Восстанавливает learning rate."""
         self.learning_rate = float(state["learning_rate"])
 
+
+class AdamW(Optimizer):
+    """Adam с bias correction и отделённым L2 decay параметров."""
+
+    def __init__(
+        self, parameters: Iterable[Parameter], learning_rate: float = 3e-4, *,
+        beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-8,
+        weight_decay: float = 0.01,
+    ) -> None:
+        super().__init__(parameters, learning_rate)
+        if not 0.0 <= beta1 < 1.0 or not 0.0 <= beta2 < 1.0:
+            raise ValueError("beta1 и beta2 должны быть в диапазоне [0, 1)")
+        if epsilon <= 0.0 or weight_decay < 0.0:
+            raise ValueError("epsilon > 0, weight_decay >= 0")
+        self.beta1 = float(beta1)
+        self.beta2 = float(beta2)
+        self.epsilon = float(epsilon)
+        self.weight_decay = float(weight_decay)
+        self.step_count = 0
+        self.first_moments = [array("f", [0.0]) * parameter.numel for parameter in self.parameters]
+        self.second_moments = [array("f", [0.0]) * parameter.numel for parameter in self.parameters]
+
+    def step(self) -> None:
+        self.step_count += 1
+        correction1 = 1.0 - self.beta1 ** self.step_count
+        correction2 = 1.0 - self.beta2 ** self.step_count
+        for parameter, first, second in zip(
+            self.parameters, self.first_moments, self.second_moments
+        ):
+            if parameter.grad is None:
+                continue
+            for index, gradient in enumerate(parameter.grad):
+                first[index] = self.beta1 * first[index] + (1.0 - self.beta1) * gradient
+                second[index] = self.beta2 * second[index] + (1.0 - self.beta2) * gradient * gradient
+                first_hat = first[index] / correction1
+                second_hat = second[index] / correction2
+                update = first_hat / (math.sqrt(second_hat) + self.epsilon)
+                parameter.data[index] -= self.learning_rate * (
+                    update + self.weight_decay * parameter.data[index]
+                )
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "type": "AdamW", "learning_rate": self.learning_rate,
+            "beta1": self.beta1, "beta2": self.beta2, "epsilon": self.epsilon,
+            "weight_decay": self.weight_decay, "step_count": self.step_count,
+            "first_moments": [array("f", values) for values in self.first_moments],
+            "second_moments": [array("f", values) for values in self.second_moments],
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        """Строго восстанавливает гиперпараметры и буферы моментов."""
+        if state.get("type") not in (None, "AdamW"):
+            raise ValueError("checkpoint содержит состояние другого оптимизатора")
+        first = state.get("first_moments")
+        second = state.get("second_moments")
+        if not isinstance(first, list) or not isinstance(second, list):
+            raise ValueError("состояние AdamW не содержит moments")
+        expected = [parameter.numel for parameter in self.parameters]
+        if [len(values) for values in first] != expected or [len(values) for values in second] != expected:
+            raise ValueError("размеры moments AdamW не совпадают с параметрами")
+        self.learning_rate = float(state["learning_rate"])
+        self.beta1 = float(state["beta1"])
+        self.beta2 = float(state["beta2"])
+        self.epsilon = float(state["epsilon"])
+        self.weight_decay = float(state["weight_decay"])
+        self.step_count = int(state["step_count"])
+        self.first_moments = [array("f", values) for values in first]
+        self.second_moments = [array("f", values) for values in second]

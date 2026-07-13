@@ -17,14 +17,16 @@
   и постоянный std::thread pool.
 - Добавлены Embedding, RMSNorm, causal multi-head attention, pre-norm блок и
   настраиваемый DecoderTransformer с обучаемыми позициями.
+- Реализованы AdamW, token dataset, warmup/decay, train/validation, аварийное
+  сохранение и безопасный бинарный checkpoint с полным resume.
 
 ## Сейчас выполняется
 
-- Этап 6: AdamW, обучение, validation и checkpoint/resume.
+- Этап 7: генерация и интерактивный чат.
 
 ## Осталось
 
-- Обучение/checkpoint, генерация, benchmark и финальный прогон.
+- Генерация, benchmark, документация и финальный прогон.
 
 ## Известные проблемы
 
@@ -39,4 +41,7 @@
 - WSL Linux: release `.so` собрана GCC 13; `tests.test_cpp_backend`: 7 тестов, OK.
 - `tests.test_transformer tests.test_layers tests.test_autograd`: 16 тестов, OK;
   causal mask доказана сравнением logits до изменённой будущей позиции.
+- AdamW/checkpoint/training smoke: 7 тестов, OK; фиксированный batch loss
+  снизился более чем на 60%, resume выполнил следующий шаг.
+- Debug training: train loss 5.56502 → 5.26042, validation loss 5.32062.
 - `python tools/make_dataset.py`: train=76, validation=14.
