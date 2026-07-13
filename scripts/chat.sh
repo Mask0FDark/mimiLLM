@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-python chat.py --checkpoint "${1:-checkpoints/mixed_demo.bin}"
+python chat.py --model "${1:-weights}"

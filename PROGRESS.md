@@ -2,11 +2,13 @@
 
 ## Готово
 
-- Проект оформлен как устанавливаемая библиотека `mimillm` версии 0.2.0.
+- Проект оформлен как устанавливаемая библиотека `mimillm` версии 0.3.0.
 - Публичный API экспортирует модель, конфигурацию, Tensor/autograd, слои,
   оптимизаторы, датасеты, генерацию и checkpoint-функции.
-- `create_model()` создаёт свою конфигурацию, `load_model()` восстанавливает
-  архитектуру и веса одной командой, `generate_text()` работает с обычной строкой.
+- `create_model()` создаёт свою конфигурацию, `save_model()` экспортирует
+  `config.json` и `model.safetensors`, а `load_model()` восстанавливает их одной командой.
+- Пути к text/question train/validation задаются в конфигурации относительно
+  каталога проекта; цикл обучения доступен через `train_from_config()`.
 - Поддерживаются text-only, QA-only и смешанные QA/text датасеты на UTF-8.
 - Реализованы decoder-only Transformer, causal attention, RMSNorm, embedding,
   MLP, SGD, AdamW, gradient clipping и динамический autograd.
@@ -20,9 +22,9 @@
 ## Проверка платформ
 
 - Windows 11 x86-64: новое Conda-окружение `mimillm`, Python 3.12,
-  MinGW-w64 GCC 15.2, editable-установка и 71/71 тест с C++ backend.
-- Windows Python fallback: 71/71 тест.
-- WSL Ubuntu x86-64: Python 3.12, GCC 13.3 и 71/71 тест с C++ backend.
+  MinGW-w64 GCC 15.2, editable-установка и полный набор тестов с C++ backend.
+- Windows Python fallback: 76/76 тестов.
+- WSL Ubuntu x86-64: Python 3.12, GCC 13.3 и 76/76 тестов с C++ backend.
 - Исходники не используют x86 intrinsics и рассчитаны на сборку под AArch64,
   но физический ARM64-запуск в этой сессии не выполнялся.
 

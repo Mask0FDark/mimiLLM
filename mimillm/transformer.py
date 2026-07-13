@@ -34,6 +34,10 @@ class TransformerConfig:
     checkpoint_interval: int = 50
     seed: int = 42
     text_ratio: float = 0.5
+    text_train_path: str = "data/text/train"
+    text_validation_path: str = "data/text/validation"
+    question_train_path: str = "data/question/train"
+    question_validation_path: str = "data/question/validation"
 
     def __post_init__(self) -> None:
         integer_positive = (
@@ -53,6 +57,14 @@ class TransformerConfig:
             raise ValueError("text_ratio должен быть от 0 до 1")
         if self.warmup_steps < 0 or self.validation_interval <= 0 or self.checkpoint_interval <= 0:
             raise ValueError("интервалы должны быть положительными, warmup_steps >= 0")
+        data_paths = (
+            "text_train_path", "text_validation_path",
+            "question_train_path", "question_validation_path",
+        )
+        for name in data_paths:
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} должен быть непустой строкой")
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> "TransformerConfig":

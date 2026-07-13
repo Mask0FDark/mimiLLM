@@ -6,7 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mimillm.dataset import TokenDataset, discover_text_files, load_qa_text, load_text_documents
+from mimillm.dataset import (
+    TokenDataset, discover_question_files, discover_text_files,
+    load_qa_text, load_text_documents,
+)
 from tools.make_dataset import build_dataset
 
 
@@ -41,6 +44,19 @@ class DatasetTests(unittest.TestCase):
             dataset = TokenDataset(path)
             inputs, targets = dataset.sample_batch(1, 4, random.Random(1))
             self.assertEqual(inputs[0][1:], targets[0][:-1])
+
+    def test_question_directory_is_loaded_recursively(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / "nested"
+            nested.mkdir()
+            first = root / "a.txt"
+            second = nested / "b.txt"
+            first.write_text("Вопрос: A?\nОтвет: B.\n", encoding="utf-8")
+            second.write_text("Вопрос: C?\nОтвет: D.\n", encoding="utf-8")
+            self.assertEqual(discover_question_files(root), [first, second])
+            self.assertEqual(len(load_qa_text(root)), 2)
+            self.assertEqual(len(TokenDataset(root).examples), 2)
 
     def test_short_example_uses_dynamic_context_without_padding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

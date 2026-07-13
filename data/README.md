@@ -4,7 +4,8 @@
 
 mimiLLM can train on two compatible next-token tasks:
 
-1. `qa_seed.jsonl` is reproducibly split into `train.txt` and `validation.txt`;
+1. `qa_seed.jsonl` is reproducibly split into `question/train/questions.txt` and
+   `question/validation/questions.txt`;
 2. ordinary documents live in `text/train` and `text/validation`.
 
 Rebuild the QA split with:
@@ -26,7 +27,8 @@ data to a corpus.
 
 mimiLLM обучается на двух совместимых задачах предсказания следующего токена:
 
-1. `qa_seed.jsonl` воспроизводимо делится на `train.txt` и `validation.txt`;
+1. `qa_seed.jsonl` воспроизводимо делится на `question/train/questions.txt` и
+   `question/validation/questions.txt`;
 2. обычные документы лежат отдельно в `text/train` и `text/validation`.
 
 Пересоздание QA-файлов:

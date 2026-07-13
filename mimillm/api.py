@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from typing import Any
 
 from .checkpoint import load_checkpoint
+from .safetensors import load_safetensors, save_safetensors
 from .transformer import DecoderTransformer, TransformerConfig
 
 
@@ -27,9 +30,43 @@ def create_model(
     return DecoderTransformer(config or TransformerConfig(**options))
 
 
+def _model_files(path: str | Path) -> tuple[Path, Path]:
+    requested = Path(path)
+    if requested.suffix.lower() == ".safetensors":
+        return requested.with_name("config.json"), requested
+    return requested / "config.json", requested / "model.safetensors"
+
+
+def save_model(path: str | Path, model: DecoderTransformer) -> Path:
+    """Saves a reusable model directory with config.json and model.safetensors."""
+    config_path, weights_path = _model_files(path)
+    weights_path.parent.mkdir(parents=True, exist_ok=True)
+    save_safetensors(
+        weights_path,
+        model.state_dict(),
+        metadata={"format": "mimiLLM", "format_version": "1"},
+    )
+    temporary = config_path.with_suffix(config_path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(model.config.to_dict(), stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(config_path)
+    return weights_path.parent
+
+
 def load_model(path: str | Path, *, eval_mode: bool = True) -> DecoderTransformer:
-    """Создаёт модель нужного размера и загружает веса из checkpoint."""
-    stored = load_checkpoint(path)
-    model = DecoderTransformer(TransformerConfig.from_dict(stored.config))
-    model.load_state_dict(stored.parameters)
+    """Loads a model directory, a .safetensors file, or a legacy training checkpoint."""
+    requested = Path(path)
+    if requested.is_dir() or requested.suffix.lower() == ".safetensors":
+        config_path, weights_path = _model_files(requested)
+        config = TransformerConfig.from_json(config_path)
+        parameters, _ = load_safetensors(weights_path)
+    else:
+        stored = load_checkpoint(requested)
+        config = TransformerConfig.from_dict(stored.config)
+        parameters = stored.parameters
+    model = DecoderTransformer(config)
+    model.load_state_dict(parameters)
     return model.eval() if eval_mode else model

@@ -9,7 +9,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXCLUDED_PARTS = {".git", "build", "__pycache__", "checkpoints", "logs", "dist"}
+EXCLUDED_PARTS = {
+    ".git", "build", "__pycache__", "checkpoints", "logs", "dist", "weights",
+}
 EXCLUDED_NAMES = {"hm.txt"}
 
 

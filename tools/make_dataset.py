@@ -62,8 +62,14 @@ def build_dataset(source: Path, train: Path, validation: Path, seed: int, ratio:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Создание датасета mimiLLM")
     parser.add_argument("--source", type=Path, default=ROOT / "data" / "qa_seed.jsonl")
-    parser.add_argument("--train", type=Path, default=ROOT / "data" / "train.txt")
-    parser.add_argument("--validation", type=Path, default=ROOT / "data" / "validation.txt")
+    parser.add_argument(
+        "--train", type=Path,
+        default=ROOT / "data" / "question" / "train" / "questions.txt",
+    )
+    parser.add_argument(
+        "--validation", type=Path,
+        default=ROOT / "data" / "question" / "validation" / "questions.txt",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--validation-ratio", type=float, default=0.15)
     args = parser.parse_args()
@@ -75,4 +81,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

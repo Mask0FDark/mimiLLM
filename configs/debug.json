@@ -13,5 +13,9 @@
   "validation_interval": 2,
   "checkpoint_interval": 2,
   "seed": 42,
-  "text_ratio": 0.5
+  "text_ratio": 0.5,
+  "text_train_path": "../data/text/train",
+  "text_validation_path": "../data/text/validation",
+  "question_train_path": "../data/question/train",
+  "question_validation_path": "../data/question/validation"
 }

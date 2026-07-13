@@ -8,10 +8,9 @@ import random
 import sys
 from pathlib import Path
 
-from mimillm.checkpoint import load_checkpoint
+from mimillm.api import load_model
 from mimillm.generation import answer_question
 from mimillm.tokenizer import ByteTokenizer
-from mimillm.transformer import DecoderTransformer, TransformerConfig
 
 
 def main() -> None:
@@ -21,16 +20,17 @@ def main() -> None:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(description="Чат с mimiLLM")
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--model", type=Path, required=True,
+        help="папка с config.json и model.safetensors (или старый .bin checkpoint)",
+    )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--max-new-tokens", type=int, default=80)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    stored = load_checkpoint(args.checkpoint)
-    config = TransformerConfig.from_dict(stored.config)
-    model = DecoderTransformer(config).eval()
-    load_checkpoint(args.checkpoint, model)
+    model = load_model(args.model)
+    config = model.config
     tokenizer = ByteTokenizer()
     rng = random.Random(args.seed)
     history: list[tuple[str, str]] = []

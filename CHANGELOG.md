@@ -1,5 +1,17 @@
 # Changelog / История изменений
 
+## 0.3.0 — 2026-07-13
+
+- Added standard `config.json` + `model.safetensors` model directories.
+- Added `save_model`, an expanded `load_model`, and a dependency-free F32 SafeTensors implementation.
+- Added configurable paths for text and question train/validation data.
+- Added reusable training APIs and separate train/use-weight examples.
+
+- Добавлены стандартные каталоги моделей с `config.json` и `model.safetensors`.
+- Добавлены `save_model`, расширенный `load_model` и независимая F32-реализация SafeTensors.
+- Пути к четырём наборам данных теперь задаются в конфигурации.
+- Цикл обучения вынесен в библиотеку, добавлены отдельные примеры обучения и загрузки весов.
+
 ## 0.2.0 — 2026-07-13
 
 - The project became an installable `mimillm` library with a public API.

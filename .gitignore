@@ -11,6 +11,7 @@ checkpoints/*
 logs/*
 !logs/.gitkeep
 dist/*
+weights/
 .conda/
 .vscode/
 .idea/

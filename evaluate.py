@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""Оценивает checkpoint на отдельном файле без обновления весов."""
+"""Оценивает сохранённую модель на отдельных данных без обновления весов."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from mimillm.checkpoint import load_checkpoint
+from mimillm.api import load_model
 from mimillm.dataset import TokenDataset
 from mimillm.tensor import no_grad
-from mimillm.transformer import DecoderTransformer, TransformerConfig
 from mimillm.utils import flatten
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validation mimiLLM")
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--model", type=Path, required=True,
+        help="папка модели, .safetensors или старый .bin checkpoint",
+    )
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument(
         "--text-data", type=Path, action="append", metavar="PATH",
@@ -23,10 +25,8 @@ def main() -> None:
     )
     parser.add_argument("--text-ratio", type=float, help="вес text loss от 0 до 1")
     args = parser.parse_args()
-    stored = load_checkpoint(args.checkpoint)
-    config = TransformerConfig.from_dict(stored.config)
-    model = DecoderTransformer(config).eval()
-    load_checkpoint(args.checkpoint, model)
+    model = load_model(args.model)
+    config = model.config
     text_ratio = config.text_ratio if args.text_ratio is None else args.text_ratio
     if not 0.0 <= text_ratio <= 1.0:
         parser.error("--text-ratio должен быть от 0 до 1")

@@ -12,22 +12,43 @@ from .tokenizer import ByteTokenizer
 TEXT_SUFFIXES = {".txt", ".md", ".text"}
 
 
+def discover_question_files(path: str | Path) -> list[Path]:
+    """Находит UTF-8 `.txt` файлы с вопросами в файле или каталоге."""
+    source = Path(path)
+    if source.is_file():
+        if source.suffix.lower() != ".txt":
+            raise ValueError(f"файл вопросов должен иметь расширение .txt: {source}")
+        return [source]
+    if not source.is_dir():
+        raise FileNotFoundError(f"путь набора вопросов не найден: {source}")
+    files = sorted(
+        (item for item in source.rglob("*.txt") if item.is_file()),
+        key=lambda item: item.as_posix().casefold(),
+    )
+    if not files:
+        raise ValueError(f"в каталоге вопросов нет файлов .txt: {source}")
+    return files
+
+
 def load_qa_text(path: str | Path) -> list[tuple[str, str]]:
-    """Читает блоки `Вопрос:`/`Ответ:` из локального UTF-8 файла."""
-    text = Path(path).read_text(encoding="utf-8")
+    """Читает блоки `Вопрос:`/`Ответ:` из UTF-8 файла или каталога."""
     result: list[tuple[str, str]] = []
-    for block_number, block in enumerate(text.split("\n\n"), 1):
-        block = block.strip()
-        if not block:
-            continue
-        lines = block.splitlines()
-        if len(lines) < 2 or not lines[0].startswith("Вопрос: ") or not lines[1].startswith("Ответ: "):
-            raise ValueError(f"блок {block_number}: ожидались строки Вопрос и Ответ")
-        question = lines[0][len("Вопрос: "):].strip()
-        answer = "\n".join([lines[1][len("Ответ: "):], *lines[2:]]).strip()
-        if not question or not answer:
-            raise ValueError(f"блок {block_number}: пустой вопрос или ответ")
-        result.append((question, answer))
+    for file_path in discover_question_files(path):
+        text = file_path.read_text(encoding="utf-8")
+        for block_number, block in enumerate(text.split("\n\n"), 1):
+            block = block.strip()
+            if not block:
+                continue
+            lines = block.splitlines()
+            if len(lines) < 2 or not lines[0].startswith("Вопрос: ") or not lines[1].startswith("Ответ: "):
+                raise ValueError(
+                    f"{file_path}, блок {block_number}: ожидались строки Вопрос и Ответ"
+                )
+            question = lines[0][len("Вопрос: "):].strip()
+            answer = "\n".join([lines[1][len("Ответ: "):], *lines[2:]]).strip()
+            if not question or not answer:
+                raise ValueError(f"{file_path}, блок {block_number}: пустой вопрос или ответ")
+            result.append((question, answer))
     if not result:
         raise ValueError(f"датасет пуст: {path}")
     return result
