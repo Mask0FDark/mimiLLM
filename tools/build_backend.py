@@ -56,6 +56,10 @@ def main() -> None:
     mode.add_argument("--debug", action="store_true")
     mode.add_argument("--release", action="store_true")
     parser.add_argument("--clean", action="store_true")
+    parser.add_argument(
+        "--output", type=Path,
+        help="output shared-library path (defaults to build/<platform name>)",
+    )
     args = parser.parse_args()
     if args.clean:
         if BUILD.exists():
@@ -65,7 +69,10 @@ def main() -> None:
             return
     compiler = find_compiler()
     BUILD.mkdir(parents=True, exist_ok=True)
-    output = BUILD / library_name()
+    output = args.output or (BUILD / library_name())
+    if not output.is_absolute():
+        output = (ROOT / output).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
     sources = [
         str(ROOT / "cpp" / "backend_api.cpp"), str(ROOT / "cpp" / "kernels.cpp"),
         str(ROOT / "cpp" / "thread_pool.cpp"),

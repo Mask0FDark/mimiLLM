@@ -26,6 +26,7 @@ class TransformerConfig:
     n_heads: int = 4
     d_mlp: int = 192
     batch_size: int = 2
+    batches_per_epoch: int | None = None
     steps: int = 100
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
@@ -47,6 +48,12 @@ class TransformerConfig:
         for name in integer_positive:
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} должен быть положительным")
+        if self.batches_per_epoch is not None and (
+            not isinstance(self.batches_per_epoch, int)
+            or isinstance(self.batches_per_epoch, bool)
+            or self.batches_per_epoch <= 0
+        ):
+            raise ValueError("batches_per_epoch должен быть положительным целым числом или null")
         if self.vocab_size != ByteTokenizer.VOCAB_SIZE:
             raise ValueError(f"vocab_size должен быть равен {ByteTokenizer.VOCAB_SIZE}")
         if self.d_model % self.n_heads:

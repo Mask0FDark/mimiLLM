@@ -135,6 +135,7 @@ my_model/
   "n_heads": 4,
   "d_mlp": 192,
   "batch_size": 1,
+  "batches_per_epoch": null,
   "steps": 2500,
   "learning_rate": 0.0008,
   "weight_decay": 0.01,
@@ -160,7 +161,8 @@ my_model/
 
 Параметры обучения:
 
-- `batch_size` и `steps` определяют объём работы;
+- `batch_size` задаёт число примеров в одном batch, а `steps` — общее число обновлений весов; большой batch обрабатывает больше токенов за шаг, поэтому скорость сравнивают по `tok/s`, а не по длительности одного шага;
+- `batches_per_epoch` задаёт длину эпохи; при `null` она рассчитывается по данным автоматически;
 - `learning_rate`, `weight_decay` и `warmup_steps` управляют AdamW;
 - `validation_interval` задаёт частоту проверки validation loss;
 - `checkpoint_interval` задаёт частоту сохранения состояния;

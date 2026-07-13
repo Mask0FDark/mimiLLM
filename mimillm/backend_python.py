@@ -26,6 +26,33 @@ def scalar_multiply(values: Sequence[float], scalar: float) -> array:
     return array("f", (value * scalar for value in values))
 
 
+def permute(
+    values: Sequence[float], shape: Sequence[int], axes: Sequence[int],
+) -> array:
+    """Copies a dense tensor into a new axis order."""
+    if len(shape) != len(axes) or sorted(axes) != list(range(len(shape))):
+        raise ValueError("permute: axes должны быть перестановкой всех осей")
+    count = math.prod(shape)
+    if len(values) != count:
+        raise ValueError("permute: размер буфера не соответствует форме")
+    if not shape:
+        return array("f", values)
+    source_strides = [math.prod(shape[index + 1:]) for index in range(len(shape))]
+    output_shape = [shape[axis] for axis in axes]
+    output_strides = [
+        math.prod(output_shape[index + 1:]) for index in range(len(output_shape))
+    ]
+    output = array("f", [0.0]) * count
+    for flat in range(count):
+        source_index = sum(
+            ((flat // output_strides[axis]) % output_shape[axis])
+            * source_strides[source_axis]
+            for axis, source_axis in enumerate(axes)
+        )
+        output[flat] = values[source_index]
+    return output
+
+
 def matmul(
     left: Sequence[float], right: Sequence[float], rows: int, inner: int, columns: int
 ) -> array:
@@ -82,6 +109,47 @@ def softmax_rows(values: Sequence[float], rows: int, columns: int) -> array:
         for column in range(columns):
             output[offset + column] /= denominator
     return output
+
+
+def softmax_backward(
+    output_values: Sequence[float], grad_output: Sequence[float],
+    rows: int, columns: int,
+) -> array:
+    """Backpropagates through a row-wise softmax."""
+    if len(output_values) != rows * columns or len(grad_output) != len(output_values):
+        raise ValueError("softmax backward: размеры буферов не соответствуют форме")
+    result = array("f", [0.0]) * len(output_values)
+    for row in range(rows):
+        offset = row * columns
+        dot = sum(
+            grad_output[offset + column] * output_values[offset + column]
+            for column in range(columns)
+        )
+        for column in range(columns):
+            result[offset + column] = output_values[offset + column] * (
+                grad_output[offset + column] - dot
+            )
+    return result
+
+
+def sum_rows(values: Sequence[float], rows: int, columns: int) -> array:
+    """Sums the last dimension of a dense row-major tensor."""
+    if len(values) != rows * columns:
+        raise ValueError("sum rows: размер буфера не соответствует форме")
+    return array("f", (
+        sum(values[row * columns:(row + 1) * columns]) for row in range(rows)
+    ))
+
+
+def sum_rows_backward(
+    grad_output: Sequence[float], rows: int, columns: int,
+) -> array:
+    """Expands each reduced row gradient across its original columns."""
+    if len(grad_output) != rows:
+        raise ValueError("sum rows backward: размер градиента не соответствует форме")
+    return array("f", (
+        grad_output[row] for row in range(rows) for _ in range(columns)
+    ))
 
 
 def relu(values: Sequence[float]) -> array:

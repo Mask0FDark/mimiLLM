@@ -41,6 +41,41 @@ class CppBackendTests(unittest.TestCase):
         values = [100.0, 101.0, 102.0, -2.0, 0.0, 2.0]
         self.assertClose(self.cpp.softmax_rows(values, 2, 3), backend_python.softmax_rows(values, 2, 3))
 
+    def test_permute_reduction_and_softmax_backward(self) -> None:
+        values = [float(index) for index in range(2 * 3 * 4)]
+        self.assertClose(
+            self.cpp.permute(values, (2, 3, 4), (1, 0, 2)),
+            backend_python.permute(values, (2, 3, 4), (1, 0, 2)),
+        )
+        self.assertClose(
+            self.cpp.sum_rows(values, 6, 4),
+            backend_python.sum_rows(values, 6, 4),
+        )
+        row_gradient = [0.25, -0.5, 1.0, 2.0, -1.0, 0.75]
+        self.assertClose(
+            self.cpp.sum_rows_backward(row_gradient, 6, 4),
+            backend_python.sum_rows_backward(row_gradient, 6, 4),
+        )
+        probabilities = self.cpp.softmax_rows(values, 6, 4)
+        upstream = [float((index % 5) - 2) / 3 for index in range(24)]
+        self.assertClose(
+            self.cpp.softmax_backward(probabilities, upstream, 6, 4),
+            backend_python.softmax_backward(probabilities, upstream, 6, 4),
+        )
+
+    def test_broadcast_forward_and_backward(self) -> None:
+        left = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        right = [10.0, 20.0, 30.0]
+        result = self.cpp.broadcast_binary(
+            left, right, (2, 3), (3,), (2, 3), "mul"
+        )
+        self.assertClose(result, [10.0, 40.0, 90.0, 40.0, 100.0, 180.0])
+        grad_left, grad_right = self.cpp.broadcast_binary_backward(
+            left, right, [1.0] * 6, (2, 3), (3,), (2, 3), "mul"
+        )
+        self.assertClose(grad_left, [10.0, 20.0, 30.0, 10.0, 20.0, 30.0])
+        self.assertClose(grad_right, [5.0, 7.0, 9.0])
+
     def test_relu_embedding_and_cross_entropy(self) -> None:
         values, upstream = [-2.0, 0.5, 3.0], [1.0, 2.0, 4.0]
         self.assertClose(self.cpp.relu(values), backend_python.relu(values))

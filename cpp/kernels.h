@@ -7,6 +7,21 @@ namespace mimillm {
 void add_f32(const float* left, const float* right, float* output, std::int64_t count);
 void mul_f32(const float* left, const float* right, float* output, std::int64_t count);
 void scalar_mul_f32(const float* input, float scalar, float* output, std::int64_t count);
+void permute_f32(const float* input, float* output, const std::int64_t* shape,
+                 const std::int64_t* axes, std::int64_t dimensions);
+void broadcast_binary_f32(
+    const float* left, const float* right, float* output,
+    const std::int64_t* left_shape, std::int64_t left_dimensions,
+    const std::int64_t* right_shape, std::int64_t right_dimensions,
+    const std::int64_t* output_shape, std::int64_t output_dimensions,
+    std::int32_t operation);
+void broadcast_binary_backward_f32(
+    const float* left, const float* right, const float* grad_output,
+    float* grad_left, float* grad_right,
+    const std::int64_t* left_shape, std::int64_t left_dimensions,
+    const std::int64_t* right_shape, std::int64_t right_dimensions,
+    const std::int64_t* output_shape, std::int64_t output_dimensions,
+    std::int32_t operation);
 void matmul_f32(const float* left, const float* right, float* output,
                 std::int64_t rows, std::int64_t inner, std::int64_t columns);
 void batched_matmul_f32(const float* left, const float* right, float* output,
@@ -14,6 +29,13 @@ void batched_matmul_f32(const float* left, const float* right, float* output,
                         std::int64_t inner, std::int64_t columns);
 void softmax_rows_f32(const float* input, float* output,
                       std::int64_t rows, std::int64_t columns);
+void softmax_backward_f32(const float* output, const float* grad_output,
+                          float* grad_input, std::int64_t rows,
+                          std::int64_t columns);
+void sum_rows_f32(const float* input, float* output,
+                  std::int64_t rows, std::int64_t columns);
+void sum_rows_backward_f32(const float* grad_output, float* grad_input,
+                           std::int64_t rows, std::int64_t columns);
 void relu_f32(const float* input, float* output, std::int64_t count);
 void relu_backward_f32(const float* input, const float* grad_output,
                        float* grad_input, std::int64_t count);
@@ -34,4 +56,3 @@ void adamw_f32(float* parameter, const float* gradient, float* first_moment,
                std::int64_t step);
 
 }  // namespace mimillm
-

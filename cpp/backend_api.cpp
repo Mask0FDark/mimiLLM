@@ -64,6 +64,43 @@ int mimillm_mul_f32(const float* a, const float* b, float* out, std::int64_t n) 
 int mimillm_scalar_mul_f32(const float* a, float s, float* out, std::int64_t n) {
     return guarded([&] { require(pointers({a, out}), "null pointer"); require(n >= 0, "count must be non-negative"); mimillm::scalar_mul_f32(a, s, out, n); });
 }
+int mimillm_permute_f32(const float* a, float* out, const std::int64_t* shape, const std::int64_t* axes, std::int64_t dimensions) {
+    return guarded([&] { require(pointers({a, out, shape, axes}), "null pointer"); require(dimensions > 0, "dimensions must be positive"); mimillm::permute_f32(a, out, shape, axes, dimensions); });
+}
+int mimillm_broadcast_binary_f32(
+    const float* left, const float* right, float* out,
+    const std::int64_t* left_shape, std::int64_t left_dimensions,
+    const std::int64_t* right_shape, std::int64_t right_dimensions,
+    const std::int64_t* output_shape, std::int64_t output_dimensions,
+    std::int32_t operation
+) {
+    return guarded([&] {
+        require(pointers({left, right, out, output_shape}), "null pointer");
+        require(output_dimensions > 0, "output dimensions must be positive");
+        mimillm::broadcast_binary_f32(
+            left, right, out, left_shape, left_dimensions, right_shape,
+            right_dimensions, output_shape, output_dimensions, operation
+        );
+    });
+}
+int mimillm_broadcast_binary_backward_f32(
+    const float* left, const float* right, const float* grad_output,
+    float* grad_left, float* grad_right,
+    const std::int64_t* left_shape, std::int64_t left_dimensions,
+    const std::int64_t* right_shape, std::int64_t right_dimensions,
+    const std::int64_t* output_shape, std::int64_t output_dimensions,
+    std::int32_t operation
+) {
+    return guarded([&] {
+        require(pointers({left, right, grad_output, grad_left, grad_right, output_shape}), "null pointer");
+        require(output_dimensions > 0, "output dimensions must be positive");
+        mimillm::broadcast_binary_backward_f32(
+            left, right, grad_output, grad_left, grad_right,
+            left_shape, left_dimensions, right_shape, right_dimensions,
+            output_shape, output_dimensions, operation
+        );
+    });
+}
 int mimillm_matmul_f32(const float* a, const float* b, float* out, std::int64_t r, std::int64_t k, std::int64_t c) {
     return guarded([&] { require(pointers({a, b, out}), "null pointer"); require(r >= 0 && k > 0 && c >= 0, "invalid matmul dimensions"); mimillm::matmul_f32(a, b, out, r, k, c); });
 }
@@ -72,6 +109,15 @@ int mimillm_batched_matmul_f32(const float* a, const float* b, float* out, std::
 }
 int mimillm_softmax_rows_f32(const float* a, float* out, std::int64_t r, std::int64_t c) {
     return guarded([&] { require(pointers({a, out}), "null pointer"); require(r >= 0 && c > 0, "invalid softmax dimensions"); mimillm::softmax_rows_f32(a, out, r, c); });
+}
+int mimillm_softmax_backward_f32(const float* out, const float* grad, float* grad_input, std::int64_t r, std::int64_t c) {
+    return guarded([&] { require(pointers({out, grad, grad_input}), "null pointer"); require(r >= 0 && c > 0, "invalid softmax dimensions"); mimillm::softmax_backward_f32(out, grad, grad_input, r, c); });
+}
+int mimillm_sum_rows_f32(const float* a, float* out, std::int64_t r, std::int64_t c) {
+    return guarded([&] { require(pointers({a, out}), "null pointer"); require(r >= 0 && c > 0, "invalid sum dimensions"); mimillm::sum_rows_f32(a, out, r, c); });
+}
+int mimillm_sum_rows_backward_f32(const float* grad, float* grad_input, std::int64_t r, std::int64_t c) {
+    return guarded([&] { require(pointers({grad, grad_input}), "null pointer"); require(r >= 0 && c > 0, "invalid sum dimensions"); mimillm::sum_rows_backward_f32(grad, grad_input, r, c); });
 }
 int mimillm_relu_f32(const float* a, float* out, std::int64_t n) {
     return guarded([&] { require(pointers({a, out}), "null pointer"); require(n >= 0, "count must be non-negative"); mimillm::relu_f32(a, out, n); });

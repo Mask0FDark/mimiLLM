@@ -242,8 +242,7 @@ class Tensor:
         if self.grad is None:
             self.grad = array("f", values)
         else:
-            for i, value in enumerate(values):
-                self.grad[i] += value
+            self.grad = get_backend().add(self.grad, values)
 
     def backward(self, gradient: "Tensor | Sequence[float] | float | None" = None) -> None:
         """Строит топологический порядок и распространяет градиент назад."""
@@ -296,16 +295,33 @@ class Tensor:
         right = self._coerce(other)
         output_shape = _broadcast_shape(self.shape, right.shape)
         output_size = _product(output_shape)
-        left_map = _broadcast_map(self.shape, output_shape)
-        right_map = _broadcast_map(right.shape, output_shape)
         selected_backend = get_backend()
-        if self.shape == right.shape == output_shape and operation == "add":
+        same_shape = self.shape == right.shape == output_shape
+        right_scalar = right.numel == 1 and self.shape == output_shape
+        native_broadcast = bool(
+            getattr(selected_backend, "supports_native_broadcast", False)
+        )
+        left_map: list[int] | None = None
+        right_map: list[int] | None = None
+        if same_shape and operation == "add":
             values = selected_backend.add(self.data, right.data)
-        elif self.shape == right.shape == output_shape and operation == "mul":
+        elif same_shape and operation == "mul":
             values = selected_backend.multiply(self.data, right.data)
-        elif operation == "mul" and right.numel == 1 and self.shape == output_shape:
+        elif right_scalar and operation == "mul":
             values = selected_backend.scalar_multiply(self.data, right.data[0])
+        elif right_scalar and operation == "div":
+            values = selected_backend.scalar_multiply(self.data, 1.0 / right.data[0])
+        elif right_scalar:
+            scalar = right.data[0]
+            values = array("f", (forward(value, scalar) for value in self.data))
+        elif native_broadcast:
+            values = selected_backend.broadcast_binary(
+                self.data, right.data, self.shape, right.shape,
+                output_shape, operation,
+            )
         else:
+            left_map = _broadcast_map(self.shape, output_shape)
+            right_map = _broadcast_map(right.shape, output_shape)
             values = array("f", (
                 forward(self.data[left_map[flat]], right.data[right_map[flat]])
                 for flat in range(output_size)
@@ -315,6 +331,72 @@ class Tensor:
 
         def backward_fn() -> None:
             assert output.grad is not None
+            if same_shape:
+                if self.requires_grad:
+                    if operation in {"add", "sub"}:
+                        self._accumulate_grad(output.grad)
+                    elif operation == "mul":
+                        self._accumulate_grad(
+                            selected_backend.multiply(output.grad, right.data)
+                        )
+                    else:
+                        self._accumulate_grad(array("f", (
+                            upstream * grad_left(left, right_value)
+                            for upstream, left, right_value in zip(
+                                output.grad, self.data, right.data
+                            )
+                        )))
+                if right.requires_grad:
+                    if operation == "add":
+                        right._accumulate_grad(output.grad)
+                    elif operation == "sub":
+                        right._accumulate_grad(
+                            selected_backend.scalar_multiply(output.grad, -1.0)
+                        )
+                    elif operation == "mul":
+                        right._accumulate_grad(
+                            selected_backend.multiply(output.grad, self.data)
+                        )
+                    else:
+                        right._accumulate_grad(array("f", (
+                            upstream * grad_right(left, right_value)
+                            for upstream, left, right_value in zip(
+                                output.grad, self.data, right.data
+                            )
+                        )))
+                return
+            if right_scalar:
+                scalar = right.data[0]
+                if self.requires_grad:
+                    if operation in {"add", "sub"}:
+                        grad = array("f", output.grad)
+                    elif operation == "mul":
+                        grad = selected_backend.scalar_multiply(output.grad, scalar)
+                    elif operation == "div":
+                        grad = selected_backend.scalar_multiply(output.grad, 1.0 / scalar)
+                    else:
+                        grad = array("f", (
+                            upstream * grad_left(left, scalar)
+                            for upstream, left in zip(output.grad, self.data)
+                        ))
+                    self._accumulate_grad(grad)
+                if right.requires_grad:
+                    right._accumulate_grad([sum(
+                        upstream * grad_right(left, scalar)
+                        for upstream, left in zip(output.grad, self.data)
+                    )])
+                return
+            if native_broadcast:
+                native_grad_left, native_grad_right = selected_backend.broadcast_binary_backward(
+                    self.data, right.data, output.grad, self.shape, right.shape,
+                    output_shape, operation,
+                )
+                if self.requires_grad:
+                    self._accumulate_grad(native_grad_left)
+                if right.requires_grad:
+                    right._accumulate_grad(native_grad_right)
+                return
+            assert left_map is not None and right_map is not None
             if self.requires_grad:
                 grad = array("f", [0.0]) * self.numel
                 for i, upstream in enumerate(output.grad):
@@ -429,15 +511,9 @@ class Tensor:
         if sorted(normalized) != list(range(self.ndim)):
             raise ValueError("axes должны быть перестановкой всех осей")
         output_shape = tuple(self.shape[axis] for axis in normalized)
-        inverse = [normalized.index(axis) for axis in range(self.ndim)]
-        source_indices: list[int] = []
-        values = array("f")
-        for flat in range(self.numel):
-            out_coords = _unravel(flat, output_shape)
-            source_coords = [out_coords[inverse[axis]] for axis in range(self.ndim)]
-            source_index = _ravel(source_coords, self.strides)
-            source_indices.append(source_index)
-            values.append(self.data[source_index])
+        inverse = tuple(normalized.index(axis) for axis in range(self.ndim))
+        selected_backend = get_backend()
+        values = selected_backend.permute(self.data, self.shape, normalized)
         output = Tensor(
             values, output_shape, requires_grad=self.requires_grad,
             parents=(self,), operation="permute",
@@ -445,10 +521,9 @@ class Tensor:
 
         def backward_fn() -> None:
             assert output.grad is not None
-            grad = array("f", [0.0]) * self.numel
-            for out_index, source_index in enumerate(source_indices):
-                grad[source_index] += output.grad[out_index]
-            self._accumulate_grad(grad)
+            self._accumulate_grad(
+                selected_backend.permute(output.grad, output_shape, inverse)
+            )
 
         output._backward_fn = backward_fn if output.requires_grad else None
         return output
@@ -472,6 +547,9 @@ class Tensor:
 
     def sum(self, axis: int | None = None, *, keepdims: bool = False) -> "Tensor":
         """Суммирует все элементы либо одну указанную ось."""
+        fast_last_axis = False
+        rows = columns = 0
+        selected_backend = get_backend()
         if axis is None:
             output_shape = (1,) * self.ndim if keepdims else ()
             output = Tensor([sum(self.data)], output_shape, requires_grad=self.requires_grad, parents=(self,), operation="sum")
@@ -486,23 +564,35 @@ class Tensor:
             else:
                 output_shape_list.pop(axis)
             output_shape = tuple(output_shape_list)
-            values = array("f", [0.0]) * _product(output_shape)
-            groups = []
-            output_strides = _contiguous_strides(output_shape)
-            for flat, value in enumerate(self.data):
-                coords = _unravel(flat, self.shape)
-                if keepdims:
-                    coords[axis] = 0
-                else:
-                    coords.pop(axis)
-                group = _ravel(coords, output_strides)
-                groups.append(group)
-                values[group] += value
+            if axis == self.ndim - 1:
+                fast_last_axis = True
+                columns = self.shape[-1]
+                rows = self.numel // columns
+                values = selected_backend.sum_rows(self.data, rows, columns)
+                groups = []
+            else:
+                values = array("f", [0.0]) * _product(output_shape)
+                groups = []
+                output_strides = _contiguous_strides(output_shape)
+                for flat, value in enumerate(self.data):
+                    coords = _unravel(flat, self.shape)
+                    if keepdims:
+                        coords[axis] = 0
+                    else:
+                        coords.pop(axis)
+                    group = _ravel(coords, output_strides)
+                    groups.append(group)
+                    values[group] += value
             output = Tensor(values, output_shape, requires_grad=self.requires_grad, parents=(self,), operation="sum")
 
         def backward_fn() -> None:
             assert output.grad is not None
-            self._accumulate_grad(array("f", (output.grad[group] for group in groups)))
+            if fast_last_axis:
+                self._accumulate_grad(
+                    selected_backend.sum_rows_backward(output.grad, rows, columns)
+                )
+            else:
+                self._accumulate_grad(array("f", (output.grad[group] for group in groups)))
 
         output._backward_fn = backward_fn if output.requires_grad else None
         return output
@@ -539,18 +629,12 @@ class Tensor:
 
         def backward_fn() -> None:
             assert output.grad is not None
-            left_matrix = rows * inner
-            right_matrix = inner * columns
             selected_backend = get_backend()
             if self.requires_grad:
-                right_transposed = array("f", [0.0]) * right.numel
-                for batch in range(batches):
-                    offset = batch * right_matrix
-                    for k in range(inner):
-                        for column in range(columns):
-                            right_transposed[offset + column * inner + k] = right.data[
-                                offset + k * columns + column
-                            ]
+                right_axes = (*range(right.ndim - 2), right.ndim - 1, right.ndim - 2)
+                right_transposed = selected_backend.permute(
+                    right.data, right.shape, right_axes
+                )
                 if batches == 1:
                     grad_left = selected_backend.matmul(
                         output.grad, right_transposed, rows, columns, inner
@@ -561,14 +645,10 @@ class Tensor:
                     )
                 self._accumulate_grad(grad_left)
             if right.requires_grad:
-                left_transposed = array("f", [0.0]) * self.numel
-                for batch in range(batches):
-                    offset = batch * left_matrix
-                    for row in range(rows):
-                        for k in range(inner):
-                            left_transposed[offset + k * rows + row] = self.data[
-                                offset + row * inner + k
-                            ]
+                left_axes = (*range(self.ndim - 2), self.ndim - 1, self.ndim - 2)
+                left_transposed = selected_backend.permute(
+                    self.data, self.shape, left_axes
+                )
                 if batches == 1:
                     grad_right = selected_backend.matmul(
                         left_transposed, output.grad, inner, rows, columns
@@ -596,18 +676,15 @@ class Tensor:
             raise ValueError("softmax первой версии поддерживает только последнюю ось")
         columns = self.shape[-1]
         rows = self.numel // columns
-        values = get_backend().softmax_rows(self.data, rows, columns)
+        selected_backend = get_backend()
+        values = selected_backend.softmax_rows(self.data, rows, columns)
         output = Tensor(values, self.shape, requires_grad=self.requires_grad, parents=(self,), operation="softmax")
 
         def backward_fn() -> None:
             assert output.grad is not None
-            grad = array("f", [0.0]) * self.numel
-            for row in range(rows):
-                offset = row * columns
-                dot = sum(output.grad[offset + c] * output.data[offset + c] for c in range(columns))
-                for column in range(columns):
-                    grad[offset + column] = output.data[offset + column] * (output.grad[offset + column] - dot)
-            self._accumulate_grad(grad)
+            self._accumulate_grad(selected_backend.softmax_backward(
+                output.data, output.grad, rows, columns
+            ))
 
         output._backward_fn = backward_fn if output.requires_grad else None
         return output

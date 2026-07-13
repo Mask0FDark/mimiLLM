@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace mimillm {
 
@@ -24,6 +25,181 @@ void scalar_mul_f32(const float* input, float scalar, float* output, std::int64_
     global_thread_pool().parallel_for(0, count, 32768, [&](std::int64_t begin, std::int64_t end) {
         for (std::int64_t i = begin; i < end; ++i) output[i] = input[i] * scalar;
     });
+}
+
+void permute_f32(const float* input, float* output, const std::int64_t* shape,
+                 const std::int64_t* axes, std::int64_t dimensions) {
+    std::int64_t count = 1;
+    std::vector<std::int64_t> source_strides(dimensions, 1);
+    std::vector<std::int64_t> output_shape(dimensions, 1);
+    std::vector<std::int64_t> output_strides(dimensions, 1);
+    for (std::int64_t axis = dimensions - 1; axis >= 0; --axis) {
+        if (shape[axis] < 0 || axes[axis] < 0 || axes[axis] >= dimensions) {
+            throw std::invalid_argument("invalid permute dimensions");
+        }
+        if (axis + 1 < dimensions) {
+            source_strides[axis] = source_strides[axis + 1] * shape[axis + 1];
+        }
+        count *= shape[axis];
+        output_shape[axis] = shape[axes[axis]];
+    }
+    for (std::int64_t axis = dimensions - 2; axis >= 0; --axis) {
+        output_strides[axis] = output_strides[axis + 1] * output_shape[axis + 1];
+    }
+    global_thread_pool().parallel_for(0, count, 4096, [&](std::int64_t begin, std::int64_t end) {
+        for (std::int64_t flat = begin; flat < end; ++flat) {
+            std::int64_t source_index = 0;
+            for (std::int64_t output_axis = 0; output_axis < dimensions; ++output_axis) {
+                const auto coordinate = (flat / output_strides[output_axis]) % output_shape[output_axis];
+                source_index += coordinate * source_strides[axes[output_axis]];
+            }
+            output[flat] = input[source_index];
+        }
+    });
+}
+
+namespace {
+
+struct BroadcastLayout {
+    std::vector<std::int64_t> output_shape;
+    std::vector<std::int64_t> output_strides;
+    std::vector<std::int64_t> operand_shape;
+    std::vector<std::int64_t> operand_strides;
+    std::int64_t offset{0};
+    std::int64_t output_count{1};
+    std::int64_t operand_count{1};
+};
+
+BroadcastLayout broadcast_layout(
+    const std::int64_t* operand_shape, std::int64_t operand_dimensions,
+    const std::int64_t* output_shape, std::int64_t output_dimensions
+) {
+    if (operand_dimensions < 0 || output_dimensions < operand_dimensions) {
+        throw std::invalid_argument("invalid broadcast dimensions");
+    }
+    BroadcastLayout layout;
+    layout.output_shape.assign(output_shape, output_shape + output_dimensions);
+    layout.operand_shape.assign(operand_shape, operand_shape + operand_dimensions);
+    layout.output_strides.assign(output_dimensions, 1);
+    layout.operand_strides.assign(operand_dimensions, 1);
+    layout.offset = output_dimensions - operand_dimensions;
+    for (std::int64_t axis = output_dimensions - 1; axis >= 0; --axis) {
+        if (layout.output_shape[axis] <= 0) throw std::invalid_argument("invalid output shape");
+        if (axis + 1 < output_dimensions) {
+            layout.output_strides[axis] = layout.output_strides[axis + 1]
+                * layout.output_shape[axis + 1];
+        }
+        layout.output_count *= layout.output_shape[axis];
+    }
+    for (std::int64_t axis = operand_dimensions - 1; axis >= 0; --axis) {
+        const auto output_axis = layout.offset + axis;
+        const auto dimension = layout.operand_shape[axis];
+        if (dimension <= 0 || (dimension != 1 && dimension != layout.output_shape[output_axis])) {
+            throw std::invalid_argument("incompatible broadcast shape");
+        }
+        if (axis + 1 < operand_dimensions) {
+            layout.operand_strides[axis] = layout.operand_strides[axis + 1]
+                * layout.operand_shape[axis + 1];
+        }
+        layout.operand_count *= dimension;
+    }
+    return layout;
+}
+
+std::int64_t broadcast_index(std::int64_t flat, const BroadcastLayout& layout) {
+    std::int64_t index = 0;
+    for (std::int64_t axis = 0; axis < static_cast<std::int64_t>(layout.operand_shape.size()); ++axis) {
+        if (layout.operand_shape[axis] == 1) continue;
+        const auto output_axis = layout.offset + axis;
+        const auto coordinate = (flat / layout.output_strides[output_axis])
+            % layout.output_shape[output_axis];
+        index += coordinate * layout.operand_strides[axis];
+    }
+    return index;
+}
+
+float binary_value(float left, float right, std::int32_t operation) {
+    switch (operation) {
+        case 0: return left + right;
+        case 1: return left - right;
+        case 2: return left * right;
+        case 3: return left / right;
+        default: throw std::invalid_argument("unknown binary operation");
+    }
+}
+
+}  // namespace
+
+void broadcast_binary_f32(
+    const float* left, const float* right, float* output,
+    const std::int64_t* left_shape, std::int64_t left_dimensions,
+    const std::int64_t* right_shape, std::int64_t right_dimensions,
+    const std::int64_t* output_shape, std::int64_t output_dimensions,
+    std::int32_t operation
+) {
+    const auto left_layout = broadcast_layout(
+        left_shape, left_dimensions, output_shape, output_dimensions
+    );
+    const auto right_layout = broadcast_layout(
+        right_shape, right_dimensions, output_shape, output_dimensions
+    );
+    global_thread_pool().parallel_for(
+        0, left_layout.output_count, 4096,
+        [&](std::int64_t begin, std::int64_t end) {
+            for (std::int64_t flat = begin; flat < end; ++flat) {
+                output[flat] = binary_value(
+                    left[broadcast_index(flat, left_layout)],
+                    right[broadcast_index(flat, right_layout)],
+                    operation
+                );
+            }
+        }
+    );
+}
+
+void broadcast_binary_backward_f32(
+    const float* left, const float* right, const float* grad_output,
+    float* grad_left, float* grad_right,
+    const std::int64_t* left_shape, std::int64_t left_dimensions,
+    const std::int64_t* right_shape, std::int64_t right_dimensions,
+    const std::int64_t* output_shape, std::int64_t output_dimensions,
+    std::int32_t operation
+) {
+    const auto left_layout = broadcast_layout(
+        left_shape, left_dimensions, output_shape, output_dimensions
+    );
+    const auto right_layout = broadcast_layout(
+        right_shape, right_dimensions, output_shape, output_dimensions
+    );
+    std::fill(grad_left, grad_left + left_layout.operand_count, 0.0F);
+    std::fill(grad_right, grad_right + right_layout.operand_count, 0.0F);
+    for (std::int64_t flat = 0; flat < left_layout.output_count; ++flat) {
+        const auto left_index = broadcast_index(flat, left_layout);
+        const auto right_index = broadcast_index(flat, right_layout);
+        const float upstream = grad_output[flat];
+        const float left_value = left[left_index];
+        const float right_value = right[right_index];
+        switch (operation) {
+            case 0:
+                grad_left[left_index] += upstream;
+                grad_right[right_index] += upstream;
+                break;
+            case 1:
+                grad_left[left_index] += upstream;
+                grad_right[right_index] -= upstream;
+                break;
+            case 2:
+                grad_left[left_index] += upstream * right_value;
+                grad_right[right_index] += upstream * left_value;
+                break;
+            case 3:
+                grad_left[left_index] += upstream / right_value;
+                grad_right[right_index] -= upstream * left_value / (right_value * right_value);
+                break;
+            default:
+                throw std::invalid_argument("unknown binary operation");
+        }
+    }
 }
 
 void matmul_f32(const float* left, const float* right, float* output,
@@ -78,6 +254,50 @@ void softmax_rows_f32(const float* input, float* output,
             for (std::int64_t column = 0; column < columns; ++column) {
                 destination[column] = static_cast<float>(destination[column] / denominator);
             }
+        }
+    });
+}
+
+void softmax_backward_f32(const float* output, const float* grad_output,
+                          float* grad_input, std::int64_t rows,
+                          std::int64_t columns) {
+    global_thread_pool().parallel_for(0, rows, 16, [&](std::int64_t begin, std::int64_t end) {
+        for (std::int64_t row = begin; row < end; ++row) {
+            const auto offset = row * columns;
+            double dot = 0.0;
+            for (std::int64_t column = 0; column < columns; ++column) {
+                dot += grad_output[offset + column] * output[offset + column];
+            }
+            for (std::int64_t column = 0; column < columns; ++column) {
+                grad_input[offset + column] = output[offset + column]
+                    * (grad_output[offset + column] - static_cast<float>(dot));
+            }
+        }
+    });
+}
+
+void sum_rows_f32(const float* input, float* output,
+                  std::int64_t rows, std::int64_t columns) {
+    global_thread_pool().parallel_for(0, rows, 64, [&](std::int64_t begin, std::int64_t end) {
+        for (std::int64_t row = begin; row < end; ++row) {
+            double total = 0.0;
+            for (std::int64_t column = 0; column < columns; ++column) {
+                total += input[row * columns + column];
+            }
+            output[row] = static_cast<float>(total);
+        }
+    });
+}
+
+void sum_rows_backward_f32(const float* grad_output, float* grad_input,
+                           std::int64_t rows, std::int64_t columns) {
+    global_thread_pool().parallel_for(0, rows, 64, [&](std::int64_t begin, std::int64_t end) {
+        for (std::int64_t row = begin; row < end; ++row) {
+            std::fill(
+                grad_input + row * columns,
+                grad_input + (row + 1) * columns,
+                grad_output[row]
+            );
         }
     });
 }
