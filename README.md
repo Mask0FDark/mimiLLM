@@ -1,10 +1,10 @@
 # mimiLLM
 
-mimiLLM — маленькая библиотека для тех, кто хочет не просто вызвать готовую LLM, а разобраться, из каких деталей она собрана.
+mimiLLM — открытая Python-библиотека для создания, обучения и исследования decoder-only языковых моделей.
 
-Внутри есть собственные тензоры на `float32`, автоматическое вычисление градиентов, слои нейронной сети, causal attention, decoder-only Transformer, AdamW, токенизатор, обучение и сохранение весов. Всё это написано без NumPy, PyTorch, TensorFlow и других ML-фреймворков. Тяжёлые операции при желании можно выполнять через небольшой многопоточный C++ backend, но библиотека работает и на чистом Python.
+Внутри есть собственные тензоры на `float32`, автоматическое вычисление градиентов, слои нейронной сети, causal attention, decoder-only Transformer, AdamW, токенизатор, обучение и сохранение весов. Всё это написано без NumPy, PyTorch, TensorFlow и других ML-фреймворков. Вычисления выполняются на чистом Python или через многопоточный C++ backend.
 
-Это не попытка заменить PyTorch и не обещание обучить ChatGPT на домашнем процессоре. mimiLLM нужна для небольших моделей, экспериментов и изучения кода, который обычно скрыт внутри больших библиотек.
+Архитектура, размеры модели, источники данных и параметры обучения задаются пользователем. Библиотеку можно использовать как основу собственного проекта, а её компактная реализация позволяет проследить весь путь от входного текста до обновления весов.
 
 [English version](#english-version)
 
@@ -30,10 +30,12 @@ mimiLLM — маленькая библиотека для тех, кто хоч
 python -m pip install "git+https://github.com/Mask0FDark/mimiLLM.git"
 ```
 
-Если исходники уже скачаны и вы хотите менять библиотеку:
+Для разработки самой библиотеки:
 
-```powershell
-python -m pip install -e E:\mimiLLM
+```bash
+git clone https://github.com/Mask0FDark/mimiLLM.git
+cd mimiLLM
+python -m pip install -e .
 ```
 
 Можно создать отдельное окружение Conda:
@@ -282,7 +284,7 @@ export MIMILLM_BACKEND=cpp
 - `MIMILLM_NUM_THREADS=N` — число рабочих потоков C++;
 - `MIMILLM_CPP_LIBRARY=/path/to/library` — явный путь к DLL или `.so`.
 
-C++ backend не меняет математику модели и не является отдельной реализацией Transformer. Он предоставляет только вычислительные kernels через стабильный C ABI, а граф модели и обучение остаются в Python.
+C++ backend отвечает за вычислительные kernels и подключается через стабильный C ABI. Граф модели, autograd и цикл обучения при этом остаются в Python, поэтому оба backend используют одну архитектуру и один публичный API.
 
 ## Проверки
 
@@ -303,21 +305,11 @@ python -m unittest discover -s tests -v
 
 Тесты проверяют тензорные операции, численные градиенты, autograd, слои, attention, оптимизаторы, checkpoint, SafeTensors, генерацию, работу с данными и короткий полный цикл обучения. Проект проверялся на Windows и WSL/Linux.
 
-## Ограничения
-
-- Обучение рассчитано на CPU и небольшое число параметров.
-- Byte tokenizer понятен, но менее экономен, чем современные subword-токенизаторы.
-- Нет GPU, mixed precision, distributed training и готовых оптимизированных kernels уровня BLAS/CUDA.
-- Увеличить размеры в конфигурации можно, но время и расход памяти быстро вырастут.
-- Хорошая генерация зависит прежде всего от качества и объёма данных, а не только от числа шагов.
-
-Если задача — изучить устройство небольшой LLM или проверить свою идею без большого стека зависимостей, текущих возможностей достаточно. Для обучения большой практической модели лучше использовать GPU-фреймворк, сохранив mimiLLM как понятный эталон устройства алгоритма.
-
 ## English version
 
-mimiLLM is a small library for people who want to inspect a language model instead of hiding it behind a large framework. It implements float32 tensors, autograd, neural-network layers, causal attention, a decoder-only Transformer, AdamW, datasets, training, generation, checkpoints, and SafeTensors weights without NumPy, PyTorch, or another ML runtime.
+mimiLLM is an open Python library for building, training, and exploring decoder-only language models. It implements float32 tensors, autograd, neural-network layers, causal attention, a decoder-only Transformer, AdamW, datasets, training, generation, checkpoints, and SafeTensors weights without NumPy, PyTorch, or another ML runtime.
 
-It is designed for education and small CPU experiments. It is not a production replacement for PyTorch and is not intended to train billion-parameter models.
+Model dimensions, datasets, and training parameters are controlled by the user. The compact implementation makes the complete path from input text to updated weights available for inspection and extension.
 
 ### Install
 
@@ -329,8 +321,10 @@ python -m pip install "git+https://github.com/Mask0FDark/mimiLLM.git"
 
 For editable local development:
 
-```powershell
-python -m pip install -e E:\mimiLLM
+```bash
+git clone https://github.com/Mask0FDark/mimiLLM.git
+cd mimiLLM
+python -m pip install -e .
 ```
 
 ### Load a model

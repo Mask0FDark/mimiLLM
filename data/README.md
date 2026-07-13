@@ -18,10 +18,10 @@ Each JSONL record contains `question`, `answer`, and an optional `variants`
 array. The text corpus loader recursively reads UTF-8 `.txt`, `.md`, and `.text`
 files. Each file stays a separate document.
 
-The included Russian and English documents are deliberately small. They test
-the pipeline; they do not teach a useful language model. Keep training and
-validation documents disjoint, check licenses, and never add secrets or private
-data to a corpus.
+The included Russian and English documents provide a ready starting dataset and
+show the expected file layout. Extend or replace them for a new model version.
+Keep training and validation documents disjoint, check licenses, and never add
+secrets or private data to a corpus.
 
 ## Русский
 
@@ -41,6 +41,7 @@ python tools/make_dataset.py --seed 42
 `variants`. Загрузчик текстов рекурсивно читает UTF-8 файлы `.txt`, `.md` и
 `.text`; каждый файл остаётся отдельным документом.
 
-Русские и английские примеры в репозитории намеренно малы и нужны только для
-проверки pipeline. Не смешивайте документы между train и validation, проверяйте
-лицензии и не добавляйте секретные или персональные данные.
+Русские и английские документы дают готовую начальную структуру датасета. Их
+можно расширить или заменить для новой версии модели. Не смешивайте документы
+между train и validation, проверяйте лицензии и не добавляйте секретные или
+персональные данные.
