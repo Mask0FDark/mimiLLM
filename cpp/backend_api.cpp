@@ -1,0 +1,98 @@
+#include "backend_api.h"
+#include "kernels.h"
+#include "thread_pool.h"
+
+#include <algorithm>
+#include <exception>
+#include <string>
+#include <thread>
+
+namespace {
+thread_local std::string last_error;
+
+bool pointers(std::initializer_list<const void*> values) {
+    return std::all_of(values.begin(), values.end(), [](const void* value) { return value != nullptr; });
+}
+
+template <typename Function>
+int guarded(Function&& function) noexcept {
+    try {
+        last_error.clear();
+        function();
+        return 0;
+    } catch (const std::exception& error) {
+        last_error = error.what();
+    } catch (...) {
+        last_error = "unknown C++ exception";
+    }
+    return 1;
+}
+
+void require(bool condition, const char* message) {
+    if (!condition) throw std::invalid_argument(message);
+}
+}  // namespace
+
+extern "C" {
+
+const char* minillm_last_error() { return last_error.c_str(); }
+
+const char* minillm_compiler_info() {
+#if defined(__clang__)
+    return "Clang " __clang_version__;
+#elif defined(__GNUC__)
+    return "GCC " __VERSION__;
+#elif defined(_MSC_VER)
+    return "MSVC";
+#else
+    return "unknown compiler";
+#endif
+}
+
+int minillm_set_num_threads(std::int32_t threads) {
+    return guarded([&] { minillm::global_thread_pool().set_active_threads(threads); });
+}
+
+std::int32_t minillm_get_num_threads() { return minillm::global_thread_pool().active_threads(); }
+
+int minillm_add_f32(const float* a, const float* b, float* out, std::int64_t n) {
+    return guarded([&] { require(pointers({a, b, out}), "null pointer"); require(n >= 0, "count must be non-negative"); minillm::add_f32(a, b, out, n); });
+}
+int minillm_mul_f32(const float* a, const float* b, float* out, std::int64_t n) {
+    return guarded([&] { require(pointers({a, b, out}), "null pointer"); require(n >= 0, "count must be non-negative"); minillm::mul_f32(a, b, out, n); });
+}
+int minillm_scalar_mul_f32(const float* a, float s, float* out, std::int64_t n) {
+    return guarded([&] { require(pointers({a, out}), "null pointer"); require(n >= 0, "count must be non-negative"); minillm::scalar_mul_f32(a, s, out, n); });
+}
+int minillm_matmul_f32(const float* a, const float* b, float* out, std::int64_t r, std::int64_t k, std::int64_t c) {
+    return guarded([&] { require(pointers({a, b, out}), "null pointer"); require(r >= 0 && k > 0 && c >= 0, "invalid matmul dimensions"); minillm::matmul_f32(a, b, out, r, k, c); });
+}
+int minillm_batched_matmul_f32(const float* a, const float* b, float* out, std::int64_t batches, std::int64_t r, std::int64_t k, std::int64_t c) {
+    return guarded([&] { require(pointers({a, b, out}), "null pointer"); require(batches > 0 && r >= 0 && k > 0 && c >= 0, "invalid batched matmul dimensions"); minillm::batched_matmul_f32(a, b, out, batches, r, k, c); });
+}
+int minillm_softmax_rows_f32(const float* a, float* out, std::int64_t r, std::int64_t c) {
+    return guarded([&] { require(pointers({a, out}), "null pointer"); require(r >= 0 && c > 0, "invalid softmax dimensions"); minillm::softmax_rows_f32(a, out, r, c); });
+}
+int minillm_relu_f32(const float* a, float* out, std::int64_t n) {
+    return guarded([&] { require(pointers({a, out}), "null pointer"); require(n >= 0, "count must be non-negative"); minillm::relu_f32(a, out, n); });
+}
+int minillm_relu_backward_f32(const float* a, const float* grad, float* out, std::int64_t n) {
+    return guarded([&] { require(pointers({a, grad, out}), "null pointer"); require(n >= 0, "count must be non-negative"); minillm::relu_backward_f32(a, grad, out, n); });
+}
+int minillm_embedding_gather_f32(const float* table, const std::int32_t* ids, float* out, std::int64_t vocab, std::int64_t width, std::int64_t count) {
+    return guarded([&] { require(pointers({table, ids, out}), "null pointer"); require(vocab > 0 && width > 0 && count >= 0, "invalid embedding dimensions"); minillm::embedding_gather_f32(table, ids, out, vocab, width, count); });
+}
+int minillm_embedding_scatter_add_f32(const std::int32_t* ids, const float* grad, float* out, std::int64_t vocab, std::int64_t width, std::int64_t count) {
+    return guarded([&] { require(pointers({ids, grad, out}), "null pointer"); require(vocab > 0 && width > 0 && count >= 0, "invalid embedding dimensions"); minillm::embedding_scatter_add_f32(ids, grad, out, vocab, width, count); });
+}
+int minillm_cross_entropy_f32(const float* logits, const std::int32_t* targets, float* loss, std::int64_t rows, std::int64_t classes) {
+    return guarded([&] { require(pointers({logits, targets, loss}), "null pointer"); require(rows > 0 && classes > 0, "invalid cross entropy dimensions"); *loss = minillm::cross_entropy_f32(logits, targets, rows, classes); });
+}
+int minillm_cross_entropy_backward_f32(const float* logits, const std::int32_t* targets, float* grad, std::int64_t rows, std::int64_t classes) {
+    return guarded([&] { require(pointers({logits, targets, grad}), "null pointer"); require(rows > 0 && classes > 0, "invalid cross entropy dimensions"); minillm::cross_entropy_backward_f32(logits, targets, grad, rows, classes); });
+}
+int minillm_adamw_f32(float* parameter, const float* gradient, float* first, float* second, std::int64_t count, float lr, float beta1, float beta2, float epsilon, float decay, std::int64_t step) {
+    return guarded([&] { require(pointers({parameter, gradient, first, second}), "null pointer"); require(count >= 0 && lr > 0 && beta1 >= 0 && beta1 < 1 && beta2 >= 0 && beta2 < 1 && epsilon > 0 && step > 0, "invalid AdamW arguments"); minillm::adamw_f32(parameter, gradient, first, second, count, lr, beta1, beta2, epsilon, decay, step); });
+}
+
+}  // extern "C"

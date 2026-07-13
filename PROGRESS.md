@@ -12,14 +12,17 @@
 - Autograd проверен центральными конечными разностями для broadcasting,
   matmul, ReLU, cross-entropy, embedding и Linear.
 - Реализованы Parameter, Module, Linear, ReLU, SGD и clipping общей нормы.
+- Собран Linux x86-64 C++20 backend через C ABI/ctypes; Python fallback сохранён.
+- Реализованы kernels matmul/batched matmul/softmax/ReLU/embedding/CE/AdamW
+  и постоянный std::thread pool.
 
 ## Сейчас выполняется
 
-- Этап 4: переносимые C++20 kernels, C ABI и ctypes backend.
+- Этап 5: decoder-only Transformer.
 
 ## Осталось
 
-- C++ backend, Transformer, обучение, checkpoint и генерация.
+- Transformer, обучение, checkpoint, генерация, benchmark и финальный прогон.
 
 ## Известные проблемы
 
@@ -31,4 +34,5 @@
 - `python -m unittest tests.test_tensor tests.test_tokenizer -v`: 16 тестов, OK.
 - `python -m unittest tests.test_autograd tests.test_layers tests.test_optimizer -v`:
   12 тестов, OK; все численные gradient checks прошли.
+- WSL Linux: release `.so` собрана GCC 13; `tests.test_cpp_backend`: 7 тестов, OK.
 - `python tools/make_dataset.py`: train=76, validation=14.

@@ -8,7 +8,7 @@ from array import array
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
-from . import backend_python
+from .backend import get_backend
 
 
 def _product(shape: Sequence[int]) -> int:
@@ -474,9 +474,11 @@ class Tensor:
         batches = _product(left_leading) if left_leading else 1
         rows, inner, columns = self.shape[-2], self.shape[-1], right.shape[-1]
         if batches == 1:
-            values = backend_python.matmul(self.data, right.data, rows, inner, columns)
+            values = get_backend().matmul(self.data, right.data, rows, inner, columns)
         else:
-            values = backend_python.batched_matmul(self.data, right.data, batches, rows, inner, columns)
+            values = get_backend().batched_matmul(
+                self.data, right.data, batches, rows, inner, columns
+            )
         output_shape = (*left_leading, rows, columns)
         requires_grad = self.requires_grad or right.requires_grad
         output = Tensor(values, output_shape, requires_grad=requires_grad, parents=(self, right), operation="matmul")
@@ -522,7 +524,7 @@ class Tensor:
             raise ValueError("softmax первой версии поддерживает только последнюю ось")
         columns = self.shape[-1]
         rows = self.numel // columns
-        values = backend_python.softmax_rows(self.data, rows, columns)
+        values = get_backend().softmax_rows(self.data, rows, columns)
         output = Tensor(values, self.shape, requires_grad=self.requires_grad, parents=(self,), operation="softmax")
 
         def backward_fn() -> None:
@@ -576,7 +578,7 @@ class Tensor:
             raise ValueError(f"ожидалось {rows} target, получено {len(checked)}")
         if any(target < 0 or target >= classes for target in checked):
             raise IndexError("target вне диапазона классов")
-        probabilities = backend_python.softmax_rows(self.data, rows, classes)
+        probabilities = get_backend().softmax_rows(self.data, rows, classes)
         loss = 0.0
         for row, target in enumerate(checked):
             loss -= math.log(max(float(probabilities[row * classes + target]), 1e-30))
@@ -594,4 +596,3 @@ class Tensor:
 
         output._backward_fn = backward_fn if self.requires_grad else None
         return output
-
