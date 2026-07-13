@@ -12,11 +12,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from minillm.checkpoint import load_checkpoint
+from mimillm.checkpoint import load_checkpoint
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Инспекция checkpoint m0fdii")
+    parser = argparse.ArgumentParser(description="Инспекция checkpoint mimiLLM")
     parser.add_argument("checkpoint", type=Path)
     args = parser.parse_args()
     data = load_checkpoint(args.checkpoint)

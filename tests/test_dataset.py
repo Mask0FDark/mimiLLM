@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from minillm.dataset import TokenDataset, discover_text_files, load_qa_text, load_text_documents
+from mimillm.dataset import TokenDataset, discover_text_files, load_qa_text, load_text_documents
 from tools.make_dataset import build_dataset
 
 
@@ -65,6 +65,16 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(inputs[0][1:], targets[0][:-1])
             self.assertEqual(dataset.source_weights(), [("text", 1.0)])
             self.assertGreater(dataset.text_tokens, 0)
+
+    def test_text_only_dataset_does_not_require_qa_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            text = Path(directory) / "corpus.txt"
+            text.write_text("Text-only training is a supported library workflow.", encoding="utf-8")
+            dataset = TokenDataset(text_paths=text, text_ratio=1.0)
+            inputs, targets = dataset.sample_batch(1, 16, random.Random(5))
+            self.assertEqual(dataset.examples, [])
+            self.assertEqual(dataset.source_weights(), [("text", 1.0)])
+            self.assertEqual(inputs[0][1:], targets[0][:-1])
 
     def test_mixed_sampler_reaches_both_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

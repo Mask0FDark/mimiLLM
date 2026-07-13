@@ -1,4 +1,4 @@
-"""Конфигурация и decoder-only Transformer модели m0fdii."""
+"""Конфигурация и decoder-only Transformer модели mimiLLM."""
 
 from __future__ import annotations
 

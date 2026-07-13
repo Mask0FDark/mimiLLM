@@ -3,8 +3,8 @@
 import unittest
 from array import array
 
-from minillm import backend_python
-from minillm.backend_cpp import CppBackend, is_available
+from mimillm import backend_python
+from mimillm.backend_cpp import CppBackend, is_available
 
 
 @unittest.skipUnless(is_available(), "C++ backend ещё не собран")

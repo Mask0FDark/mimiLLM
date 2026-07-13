@@ -25,6 +25,7 @@ def main() -> None:
                 path.is_file()
                 and path.name not in EXCLUDED_NAMES
                 and not any(part in EXCLUDED_PARTS for part in relative.parts)
+                and not any(part.endswith(".egg-info") for part in relative.parts)
             ):
                 archive.write(path, Path("mimiLLM") / relative)
     print(f"Создан релиз: {args.output}")

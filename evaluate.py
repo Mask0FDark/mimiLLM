@@ -6,15 +6,15 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from minillm.checkpoint import load_checkpoint
-from minillm.dataset import TokenDataset
-from minillm.tensor import no_grad
-from minillm.transformer import DecoderTransformer, TransformerConfig
-from minillm.utils import flatten
+from mimillm.checkpoint import load_checkpoint
+from mimillm.dataset import TokenDataset
+from mimillm.tensor import no_grad
+from mimillm.transformer import DecoderTransformer, TransformerConfig
+from mimillm.utils import flatten
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validation m0fdii")
+    parser = argparse.ArgumentParser(description="Validation mimiLLM")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument(

@@ -1,51 +1,44 @@
-# Состояние проекта mimiLLM / m0fdii
+# Состояние mimiLLM
 
 ## Готово
 
-- Реализована маленькая decoder-only Transformer с UTF-8 byte tokenizer.
-- Реализованы собственные непрерывные float32 Tensor, динамический autograd,
-  Parameter/Module, слои, causal attention, SGD и AdamW без внешних библиотек.
-- Добавлен переносимый C++20 backend через стабильный C ABI/ctypes: elementwise,
-  matmul/batched matmul, softmax, ReLU, embedding, cross-entropy и AdamW.
-- Исправлена синхронизация постоянного `std::thread` pool и добавлен stress test.
-- Работают train/validation, gradient clipping, warmup/decay, атомарный бинарный
-  checkpoint, полное resume, generation и интерактивный chat.
-- QA-примеры выбираются как отдельные последовательности, поэтому модель видит
-  соответствие полного вопроса началу ответа, а не случайные куски общего файла.
-- Добавлено смешанное обучение на QA и обычных UTF-8 `.txt`/`.md`/`.text`
-  документах. `text_ratio` управляет долей text batch; train и validation
-  корпуса разделены; в логе указывается источник каждого шага.
-- Разделены воспроизводимые `qa_demo.json` (QA-only) и `mixed_demo.json`
-  (QA + тексты), чтобы режимы можно было изучать и сравнивать отдельно.
-- В репозитории есть небольшой русский и английский text-корпус для проверки.
-  Внешние каталоги подключаются повторяющимися аргументами CLI.
-- Добавлены Windows Conda/MinGW и Linux Conda окружения, PowerShell/bash setup,
-  benchmark, инспектор checkpoint, упаковщик исходного ZIP и подробная документация.
+- Проект оформлен как устанавливаемая библиотека `mimillm` версии 0.2.0.
+- Публичный API экспортирует модель, конфигурацию, Tensor/autograd, слои,
+  оптимизаторы, датасеты, генерацию и checkpoint-функции.
+- `create_model()` создаёт свою конфигурацию, `load_model()` восстанавливает
+  архитектуру и веса одной командой, `generate_text()` работает с обычной строкой.
+- Поддерживаются text-only, QA-only и смешанные QA/text датасеты на UTF-8.
+- Реализованы decoder-only Transformer, causal attention, RMSNorm, embedding,
+  MLP, SGD, AdamW, gradient clipping и динамический autograd.
+- C++20 backend использует стабильный C ABI `mimillm_*` и постоянный thread pool;
+  Python fallback не требует сторонних runtime-библиотек.
+- Checkpoint `MIMILLM1` хранит конфигурацию, веса, состояние AdamW, step и seed
+  без небезопасного `pickle`.
+- Есть Conda-окружения для Windows и Linux, `pyproject.toml`, примеры, benchmark,
+  инструменты сборки/проверки и двуязычный README.
 
-## Проверенные платформы
+## Проверка платформ
 
-- Windows 11 x86-64, Conda Python 3.12, MinGW-w64 GCC 15.2: release DLL собрана,
-  63/63 теста прошли с C++ backend и 63/63 с Python fallback.
-- WSL Ubuntu x86-64, Python 3.12, GCC 13.3: release `.so` собрана, 63/63 теста
-  прошли с C++ backend.
-- Linux AArch64 поддерживается переносимым исходным кодом и флагами, но в этой
-  сессии физическая ARM64-машина не была доступна для запуска.
+- Windows 11 x86-64: новое Conda-окружение `mimillm`, Python 3.12,
+  MinGW-w64 GCC 15.2, editable-установка и 71/71 тест с C++ backend.
+- Windows Python fallback: 71/71 тест.
+- WSL Ubuntu x86-64: Python 3.12, GCC 13.3 и 71/71 тест с C++ backend.
+- Исходники не используют x86 intrinsics и рассчитаны на сборку под AArch64,
+  но физический ARM64-запуск в этой сессии не выполнялся.
 
-## Результаты обучения
+## Контрольное обучение
 
-- QA-обучение до шага 1000: train loss на последнем шаге `1.19328`,
-  QA validation loss `1.07530`.
-- Смешанный debug run (QA + русский/английский текст): train loss
-  `5.48604 → 5.13350`, weighted validation loss `5.34125 → 5.32229` за 4 шага.
-- Продолжение демонстрационного checkpoint на смешанном корпусе выполняется
-  отдельно; checkpoint и логи исключены из Git и исходного релиза.
+Смешанный профиль дошёл до шага 2500. Последний train loss — `0.72131`,
+weighted validation loss — `1.48545` (`qa=0.81922`, `text=2.72273`).
+Это подтверждает работу train/resume и
+смешивания источников, но небольшой демонстрационный корпус не создаёт качество
+готовой разговорной модели.
 
-## Известные ограничения
+## Ограничения
 
-- Модель на 122 948 параметров и демонстрационный корпус показывают механизм,
-  но пока не дают качество современной LLM и не должны описываться как ChatGPT.
-- Для реального изучения языков нужны существенно больший проверенный корпус,
-  больше контекст, параметров, шагов и вычислений.
-- MinGW Conda для Windows не содержит runtime ASan/UBSan; Windows debug build
-  использует символы и проверки компилятора без санитайзеров. Linux debug build
-  поддерживает ASan/UBSan.
+- Текущий backend ориентирован на обучение и эксперименты на CPU. Конфигурацию
+  можно увеличить, но для миллиардов параметров нужен новый GPU/distributed backend.
+- Byte tokenizer прост и универсален, но расходует несколько токенов на многие
+  Unicode-символы.
+- Windows debug build MinGW не использует ASan/UBSan из-за отсутствующих runtime;
+  Linux debug build поддерживает эти санитайзеры.

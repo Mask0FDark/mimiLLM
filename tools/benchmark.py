@@ -15,10 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from minillm import backend_python
-from minillm.backend_cpp import CppBackend, is_available
-from minillm.optim import AdamW
-from minillm.transformer import DecoderTransformer, TransformerConfig
+from mimillm import backend_python
+from mimillm.backend_cpp import CppBackend, is_available
+from mimillm.optim import AdamW
+from mimillm.transformer import DecoderTransformer, TransformerConfig
 
 
 def measure(function, repeats: int) -> float:
@@ -31,7 +31,7 @@ def measure(function, repeats: int) -> float:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark m0fdii")
+    parser = argparse.ArgumentParser(description="Benchmark mimiLLM")
     parser.add_argument("--size", type=int, default=96)
     parser.add_argument("--threads", type=int, default=max(1, os.cpu_count() or 1))
     parser.add_argument("--repeats", type=int, default=3)

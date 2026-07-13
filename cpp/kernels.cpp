@@ -6,7 +6,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace minillm {
+namespace mimillm {
 
 void add_f32(const float* left, const float* right, float* output, std::int64_t count) {
     global_thread_pool().parallel_for(0, count, 32768, [&](std::int64_t begin, std::int64_t end) {
@@ -166,4 +166,4 @@ void adamw_f32(float* parameter, const float* gradient, float* first_moment,
     }
 }
 
-}  // namespace minillm
+}  // namespace mimillm

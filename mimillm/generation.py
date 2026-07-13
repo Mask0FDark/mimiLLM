@@ -73,3 +73,21 @@ def answer_question(
     prompt = tokenizer.encode_prompt(question)
     generated = generate(model, prompt, **settings)  # type: ignore[arg-type]
     return tokenizer.decode(generated).strip()
+
+
+def generate_text(
+    model: DecoderTransformer,
+    prompt: str,
+    *,
+    tokenizer: ByteTokenizer | None = None,
+    include_prompt: bool = False,
+    **settings: object,
+) -> str:
+    """Продолжает обычный UTF-8 текст и возвращает строку, а не token ids."""
+    if not isinstance(prompt, str) or not prompt:
+        raise ValueError("prompt должен быть непустой строкой")
+    codec = tokenizer or ByteTokenizer()
+    prompt_tokens = codec.encode(prompt, add_bos=True)
+    generated = generate(model, prompt_tokens, **settings)  # type: ignore[arg-type]
+    continuation = codec.decode(generated)
+    return prompt + continuation if include_prompt else continuation

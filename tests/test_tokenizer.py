@@ -2,7 +2,7 @@
 
 import unittest
 
-from minillm.tokenizer import ByteTokenizer
+from mimillm.tokenizer import ByteTokenizer
 
 
 class ByteTokenizerTests(unittest.TestCase):

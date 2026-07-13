@@ -1,8 +1,9 @@
-name: minillm
+name: mimillm
 channels:
   - conda-forge
 dependencies:
   - python=3.12
   - cxx-compiler
   - git
-
+  - pip
+  - setuptools

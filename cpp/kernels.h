@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace minillm {
+namespace mimillm {
 
 void add_f32(const float* left, const float* right, float* output, std::int64_t count);
 void mul_f32(const float* left, const float* right, float* output, std::int64_t count);
@@ -33,5 +33,5 @@ void adamw_f32(float* parameter, const float* gradient, float* first_moment,
                float beta1, float beta2, float epsilon, float weight_decay,
                std::int64_t step);
 
-}  // namespace minillm
+}  // namespace mimillm
 

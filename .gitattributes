@@ -1,4 +1,5 @@
 * text=auto
+.gitattributes text eol=lf
 *.py text eol=lf
 *.sh text eol=lf
 *.cpp text eol=lf
@@ -8,4 +9,8 @@
 *.txt text eol=lf
 *.md text eol=lf
 *.yml text eol=lf
+*.toml text eol=lf
+*.typed text eol=lf
+LICENSE text eol=lf
+.gitignore text eol=lf
 *.ps1 text eol=crlf

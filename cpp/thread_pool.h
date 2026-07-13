@@ -9,7 +9,7 @@
 #include <thread>
 #include <vector>
 
-namespace minillm {
+namespace mimillm {
 
 class ThreadPool {
 public:
@@ -35,5 +35,5 @@ private:
 
 ThreadPool& global_thread_pool();
 
-}  // namespace minillm
+}  // namespace mimillm
 

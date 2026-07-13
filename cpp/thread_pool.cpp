@@ -4,7 +4,7 @@
 #include <memory>
 #include <stdexcept>
 
-namespace minillm {
+namespace mimillm {
 
 ThreadPool::ThreadPool() {
     const auto hardware = std::max(1U, std::thread::hardware_concurrency());
@@ -103,4 +103,4 @@ ThreadPool& global_thread_pool() {
     return pool;
 }
 
-}  // namespace minillm
+}  // namespace mimillm

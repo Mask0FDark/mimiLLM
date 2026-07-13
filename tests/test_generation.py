@@ -3,9 +3,9 @@
 import random
 import unittest
 
-from minillm.generation import generate, sample_token
-from minillm.tensor import Tensor
-from minillm.tokenizer import ByteTokenizer
+from mimillm.generation import generate, generate_text, sample_token
+from mimillm.tensor import Tensor
+from mimillm.tokenizer import ByteTokenizer
 
 
 class _Config:
@@ -42,6 +42,19 @@ class GenerationTests(unittest.TestCase):
             temperature=0.0, top_k=0,
         )
         self.assertEqual(generated, [])
+
+    def test_generate_text_returns_a_string(self) -> None:
+        self.assertEqual(
+            generate_text(_EosModel(), "hello", max_new_tokens=2, temperature=0.0, top_k=1),
+            "",
+        )
+        self.assertEqual(
+            generate_text(
+                _EosModel(), "hello", include_prompt=True,
+                max_new_tokens=2, temperature=0.0, top_k=1,
+            ),
+            "hello",
+        )
 
 
 if __name__ == "__main__":

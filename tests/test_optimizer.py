@@ -2,8 +2,8 @@
 
 import unittest
 
-from minillm.optim import AdamW, SGD
-from minillm.parameter import Parameter
+from mimillm.optim import AdamW, SGD
+from mimillm.parameter import Parameter
 
 
 class OptimizerTests(unittest.TestCase):

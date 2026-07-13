@@ -16,7 +16,7 @@ from .optim import AdamW, Optimizer
 from .tensor import Tensor
 
 
-MAGIC = b"M0FDIICK"
+MAGIC = b"MIMILLM1"
 VERSION = 1
 HEADER = struct.Struct("<8sIQ")
 MAX_METADATA = 16 * 1024 * 1024
@@ -89,7 +89,7 @@ def save_checkpoint(
             optimizer_meta["moment_counts"] = [len(values) for values in first]
             moment_buffers = [*first, *second]  # type: ignore[list-item]
     metadata = {
-        "format": "m0fdii-checkpoint", "config": config, "step": int(step),
+        "format": "mimiLLM-checkpoint", "config": config, "step": int(step),
         "seed": int(seed), "parameters": descriptors, "optimizer": optimizer_meta,
     }
     encoded = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -134,6 +134,8 @@ def load_checkpoint(
             raise ValueError(f"повреждены metadata checkpoint: {exc}") from exc
         if not isinstance(metadata, dict) or not isinstance(metadata.get("parameters"), list):
             raise ValueError("metadata checkpoint имеют неверную схему")
+        if metadata.get("format") != "mimiLLM-checkpoint":
+            raise ValueError("checkpoint содержит неизвестный формат metadata")
         parameters: dict[str, Tensor] = {}
         for descriptor in metadata["parameters"]:
             if not isinstance(descriptor, dict):
@@ -174,4 +176,3 @@ def load_checkpoint(
             raise TypeError("оптимизатор не поддерживает load_state_dict")
         optimizer.load_state_dict(optimizer_state)  # type: ignore[attr-defined]
     return data
-

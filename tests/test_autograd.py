@@ -3,9 +3,9 @@
 import random
 import unittest
 
-from minillm.autograd import gradcheck
-from minillm.layers import Linear
-from minillm.tensor import Tensor, is_grad_enabled, no_grad
+from mimillm.autograd import gradcheck
+from mimillm.layers import Linear
+from mimillm.tensor import Tensor, is_grad_enabled, no_grad
 
 
 class AutogradTests(unittest.TestCase):

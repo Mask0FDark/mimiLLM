@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Интерактивный терминальный чат с обученной моделью m0fdii."""
+"""Интерактивный терминальный чат с обученной моделью mimiLLM."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import random
 import sys
 from pathlib import Path
 
-from minillm.checkpoint import load_checkpoint
-from minillm.generation import answer_question
-from minillm.tokenizer import ByteTokenizer
-from minillm.transformer import DecoderTransformer, TransformerConfig
+from mimillm.checkpoint import load_checkpoint
+from mimillm.generation import answer_question
+from mimillm.tokenizer import ByteTokenizer
+from mimillm.transformer import DecoderTransformer, TransformerConfig
 
 
 def main() -> None:
@@ -20,7 +20,7 @@ def main() -> None:
         sys.stdout.reconfigure(errors="replace")
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(errors="replace")
-    parser = argparse.ArgumentParser(description="Чат с m0fdii")
+    parser = argparse.ArgumentParser(description="Чат с mimiLLM")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-k", type=int, default=20)
@@ -34,7 +34,7 @@ def main() -> None:
     tokenizer = ByteTokenizer()
     rng = random.Random(args.seed)
     history: list[tuple[str, str]] = []
-    print("m0fdii готова. Для выхода напишите /exit.")
+    print("mimiLLM готова. Для выхода напишите /exit.")
     while True:
         try:
             question = input("\nВы: ").strip()
@@ -64,7 +64,7 @@ def main() -> None:
             temperature=args.temperature, top_k=args.top_k, rng=rng,
         )
         history.append((question, answer))
-        print(f"m0fdii: {answer or '[пустая генерация]'}")
+        print(f"mimiLLM: {answer or '[пустая генерация]'}")
 
 
 if __name__ == "__main__":

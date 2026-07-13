@@ -3,8 +3,8 @@
 import random
 import unittest
 
-from minillm.layers import Linear, ReLU
-from minillm.tensor import Tensor
+from mimillm.layers import Linear, ReLU
+from mimillm.tensor import Tensor
 
 
 class LayerTests(unittest.TestCase):

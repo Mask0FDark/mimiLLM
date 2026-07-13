@@ -5,11 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("MINILLM_BACKEND", "python")
+os.environ.setdefault("MIMILLM_BACKEND", "python")
 
-from minillm.checkpoint import load_checkpoint, save_checkpoint
-from minillm.optim import AdamW
-from minillm.transformer import DecoderTransformer, TransformerConfig
+from mimillm.checkpoint import load_checkpoint, save_checkpoint
+from mimillm.optim import AdamW
+from mimillm.transformer import DecoderTransformer, TransformerConfig
 
 
 class TrainingSmokeTests(unittest.TestCase):

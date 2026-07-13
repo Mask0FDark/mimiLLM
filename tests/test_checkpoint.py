@@ -1,15 +1,17 @@
 """Roundtrip и защита собственного checkpoint-формата."""
 
 import os
+import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("MINILLM_BACKEND", "python")
+os.environ.setdefault("MIMILLM_BACKEND", "python")
 
-from minillm.checkpoint import load_checkpoint, save_checkpoint
-from minillm.optim import AdamW
-from minillm.transformer import DecoderTransformer, TransformerConfig
+from mimillm.checkpoint import load_checkpoint, save_checkpoint
+from mimillm.optim import AdamW
+from mimillm.transformer import DecoderTransformer, TransformerConfig
 
 
 class CheckpointTests(unittest.TestCase):
@@ -52,6 +54,23 @@ class CheckpointTests(unittest.TestCase):
             path = Path(directory) / "bad.bin"
             path.write_bytes(b"NOTMODEL" + b"\0" * 20)
             with self.assertRaisesRegex(ValueError, "magic"):
+                load_checkpoint(path)
+
+    def test_unknown_metadata_format_is_detected(self) -> None:
+        model = DecoderTransformer(self.config)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.bin"
+            save_checkpoint(path, model, None, config=self.config.to_dict(), step=0, seed=1)
+            raw = path.read_bytes()
+            header = struct.Struct("<8sIQ")
+            magic, version, size = header.unpack(raw[:header.size])
+            metadata = json.loads(raw[header.size:header.size + size])
+            metadata["format"] = "unknown"
+            encoded = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+            path.write_bytes(
+                header.pack(magic, version, len(encoded)) + encoded + raw[header.size + size:]
+            )
+            with self.assertRaisesRegex(ValueError, "формат metadata"):
                 load_checkpoint(path)
 
 

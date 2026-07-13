@@ -4,6 +4,8 @@ __pycache__/
 *.so
 *.dll
 *.dylib
+*.egg-info/
+.pytest_cache/
 checkpoints/*
 !checkpoints/.gitkeep
 logs/*
@@ -12,4 +14,3 @@ dist/*
 .conda/
 .vscode/
 .idea/
-

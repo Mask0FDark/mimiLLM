@@ -13,13 +13,13 @@ _backend: Any | None = None
 
 
 def get_backend() -> Any:
-    """Лениво выбирает backend согласно MINILLM_BACKEND."""
+    """Лениво выбирает backend согласно MIMILLM_BACKEND."""
     global _backend
     if _backend is not None:
         return _backend
-    requested = os.environ.get("MINILLM_BACKEND", "auto").lower()
+    requested = os.environ.get("MIMILLM_BACKEND", "auto").lower()
     if requested not in {"auto", "python", "cpp"}:
-        raise ValueError("MINILLM_BACKEND должен быть python, cpp или не задан")
+        raise ValueError("MIMILLM_BACKEND должен быть python, cpp или не задан")
     if requested != "python":
         try:
             from .backend_cpp import CppBackend

@@ -2,7 +2,7 @@
 
 import unittest
 
-from minillm.tensor import Tensor
+from mimillm.tensor import Tensor
 
 
 class TensorTests(unittest.TestCase):

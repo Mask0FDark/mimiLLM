@@ -1,4 +1,4 @@
-"""Базовые нейросетевые слои m0fdii."""
+"""Базовые нейросетевые слои mimiLLM."""
 
 from __future__ import annotations
 

@@ -5,12 +5,12 @@ import random
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("MINILLM_BACKEND", "python")
+os.environ.setdefault("MIMILLM_BACKEND", "python")
 
-from minillm.attention import MultiHeadCausalSelfAttention
-from minillm.layers import Embedding, RMSNorm
-from minillm.tensor import Tensor
-from minillm.transformer import DecoderTransformer, TransformerBlock, TransformerConfig
+from mimillm.attention import MultiHeadCausalSelfAttention
+from mimillm.layers import Embedding, RMSNorm
+from mimillm.tensor import Tensor
+from mimillm.transformer import DecoderTransformer, TransformerBlock, TransformerConfig
 
 
 class TransformerTests(unittest.TestCase):

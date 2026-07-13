@@ -18,10 +18,10 @@ BUILD = ROOT / "build"
 
 def library_name() -> str:
     if sys.platform == "win32":
-        return "minillm_backend.dll"
+        return "mimillm_backend.dll"
     if sys.platform == "darwin":
-        return "libminillm_backend.dylib"
-    return "libminillm_backend.so"
+        return "libmimillm_backend.dylib"
+    return "libmimillm_backend.so"
 
 
 def find_compiler() -> str:
@@ -45,13 +45,13 @@ def find_compiler() -> str:
         if path:
             return path
     raise SystemExit(
-        "C++ compiler не найден. Активируйте Conda-окружение minillm "
+        "C++ compiler не найден. Активируйте Conda-окружение mimillm "
         "или задайте CXX=/путь/к/g++."
     )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Сборка C++ backend m0fdii")
+    parser = argparse.ArgumentParser(description="Сборка C++ backend mimiLLM")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--debug", action="store_true")
     mode.add_argument("--release", action="store_true")
@@ -76,8 +76,8 @@ def main() -> None:
         command = [compiler, "/nologo", "/std:c++20", "/EHsc", "/LD", "/W4"]
         command += ["/Od", "/Zi"] if args.debug else ["/O2", "/DNDEBUG"]
         command += [*sources, f"/Fe:{output}"]
-        if os.environ.get("MINILLM_NATIVE") == "1":
-            print("MINILLM_NATIVE игнорируется для MSVC: переносимый baseline сохраняется.")
+        if os.environ.get("MIMILLM_NATIVE") == "1":
+            print("MIMILLM_NATIVE игнорируется для MSVC: переносимый baseline сохраняется.")
     else:
         command = [
             compiler, "-std=c++20", "-shared", "-pthread", "-Wall", "-Wextra", "-Wpedantic",
@@ -100,7 +100,7 @@ def main() -> None:
             command[1:1] = debug_flags
         else:
             command[1:1] = ["-O3", "-DNDEBUG"]
-        if os.environ.get("MINILLM_NATIVE") == "1":
+        if os.environ.get("MIMILLM_NATIVE") == "1":
             command.insert(1, "-march=native")
             print("ВНИМАНИЕ: -march=native делает библиотеку непереносимой между CPU.")
     print(f"Платформа: {platform.system()} {platform.machine()}")

@@ -2,6 +2,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-export MINILLM_BACKEND="${MINILLM_BACKEND:-cpp}"
-export MINILLM_NUM_THREADS="${MINILLM_NUM_THREADS:-4}"
+export MIMILLM_BACKEND="${MIMILLM_BACKEND:-cpp}"
+export MIMILLM_NUM_THREADS="${MIMILLM_NUM_THREADS:-4}"
 python train.py --config configs/mixed_demo.json --output checkpoints/mixed_demo.bin "$@"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Обучает m0fdii предсказывать следующий UTF-8 byte token."""
+"""Обучает mimiLLM предсказывать следующий UTF-8 byte token."""
 
 from __future__ import annotations
 
@@ -10,13 +10,13 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from minillm.backend import get_backend
-from minillm.checkpoint import load_checkpoint, save_checkpoint
-from minillm.dataset import TokenDataset
-from minillm.optim import AdamW
-from minillm.tensor import no_grad
-from minillm.transformer import DecoderTransformer, TransformerConfig
-from minillm.utils import flatten, learning_rate_at
+from mimillm.backend import get_backend
+from mimillm.checkpoint import load_checkpoint, save_checkpoint
+from mimillm.dataset import TokenDataset
+from mimillm.optim import AdamW
+from mimillm.tensor import no_grad
+from mimillm.transformer import DecoderTransformer, TransformerConfig
+from mimillm.utils import flatten, learning_rate_at
 
 
 ROOT = Path(__file__).resolve().parent
@@ -73,7 +73,7 @@ def run_training(
     backend_name = getattr(backend, "name", "python")
     threads = getattr(backend, "num_threads", 1)
     destination = output or resume or ROOT / "checkpoints" / "debug.bin"
-    print(f"m0fdii: parameters={model.parameter_count()}, backend={backend_name}, threads={threads}")
+    print(f"mimiLLM: parameters={model.parameter_count()}, backend={backend_name}, threads={threads}")
     print(
         f"data: qa_train={len(train_data.examples)} "
         f"text_train={len(train_data.text_documents)} text_ratio={config.text_ratio:.2f}"
@@ -121,7 +121,7 @@ def run_training(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Обучение m0fdii")
+    parser = argparse.ArgumentParser(description="Обучение mimiLLM")
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "debug.json")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--output", type=Path)

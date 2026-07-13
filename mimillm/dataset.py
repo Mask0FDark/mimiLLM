@@ -77,7 +77,7 @@ class TokenDataset:
 
     def __init__(
         self,
-        path: str | Path,
+        path: str | Path | None = None,
         tokenizer: ByteTokenizer | None = None,
         *,
         text_paths: Iterable[str | Path] | str | Path | None = None,
@@ -85,10 +85,10 @@ class TokenDataset:
     ) -> None:
         if not 0.0 <= text_ratio <= 1.0:
             raise ValueError("text_ratio должен быть от 0 до 1")
-        self.path = Path(path)
+        self.path = Path(path) if path is not None else None
         self.tokenizer = tokenizer or ByteTokenizer()
         self.text_ratio = float(text_ratio)
-        self.examples = load_qa_text(self.path)
+        self.examples = load_qa_text(self.path) if self.path is not None else []
         self.sequences = [
             self.tokenizer.encode_qa(question, answer)
             for question, answer in self.examples
@@ -105,7 +105,7 @@ class TokenDataset:
             raise ValueError("в датасете недостаточно токенов")
         if any(len(sequence) < 2 for sequence in [*self.sequences, *self.text_sequences]):
             raise ValueError("пример датасета слишком короткий")
-        self.last_source = "qa"
+        self.last_source = "qa" if self.sequences else "text"
 
     def source_weights(self) -> list[tuple[str, float]]:
         """Возвращает фактические вероятности источников с учётом их наличия."""
