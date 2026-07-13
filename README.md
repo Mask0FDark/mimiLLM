@@ -22,6 +22,7 @@ conda env create -f environment-windows.yml
 conda activate minillm
 python tools/build_backend.py --release
 python -m unittest discover -s tests -v
+python train.py --config configs/mixed_demo.json --output checkpoints/mixed_demo.bin
 ```
 
 Linux quick start:
@@ -31,4 +32,5 @@ conda env create -f environment.yml
 conda activate minillm
 python tools/build_backend.py --release
 python -m unittest discover -s tests -v
+python train.py --config configs/mixed_demo.json --output checkpoints/mixed_demo.bin
 ```

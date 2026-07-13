@@ -3,6 +3,7 @@
 import os
 import random
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("MINILLM_BACKEND", "python")
 
@@ -61,6 +62,14 @@ class TransformerTests(unittest.TestCase):
             TransformerConfig(vocab_size=100)
         with self.assertRaisesRegex(ValueError, "text_ratio"):
             TransformerConfig(text_ratio=1.1)
+
+    def test_all_example_configs_are_valid(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        configs = sorted((root / "configs").glob("*.json"))
+        self.assertGreaterEqual(len(configs), 4)
+        for path in configs:
+            with self.subTest(config=path.name):
+                TransformerConfig.from_json(path)
 
 
 if __name__ == "__main__":
