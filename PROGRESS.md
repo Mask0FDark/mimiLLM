@@ -19,14 +19,16 @@
   настраиваемый DecoderTransformer с обучаемыми позициями.
 - Реализованы AdamW, token dataset, warmup/decay, train/validation, аварийное
   сохранение и безопасный бинарный checkpoint с полным resume.
+- Добавлены greedy/temperature/top-k генерация, EOS stopping и терминальный чат
+  с командами; ответы всегда порождаются logits модели.
 
 ## Сейчас выполняется
 
-- Этап 7: генерация и интерактивный чат.
+- Этап 8: benchmark и проверка переносимости.
 
 ## Осталось
 
-- Генерация, benchmark, документация и финальный прогон.
+- Benchmark, документация и финальный прогон.
 
 ## Известные проблемы
 
@@ -44,4 +46,5 @@
 - AdamW/checkpoint/training smoke: 7 тестов, OK; фиксированный batch loss
   снизился более чем на 60%, resume выполнил следующий шаг.
 - Debug training: train loss 5.56502 → 5.26042, validation loss 5.32062.
+- Generation: 3 теста, OK; интерактивный запуск и корректный `/exit` проверены.
 - `python tools/make_dataset.py`: train=76, validation=14.
