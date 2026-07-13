@@ -67,6 +67,27 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(len(inputs[0]), len(dataset.sequences[0]) - 1)
             self.assertNotIn(dataset.tokenizer.PAD, inputs[0])
 
+    def test_training_batch_masks_prompt_and_padding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "data.txt"
+            path.write_text(
+                "Вопрос: A?\nОтвет: B.\n\n"
+                "Вопрос: A much longer question?\nОтвет: A longer answer.\n",
+                encoding="utf-8",
+            )
+            dataset = TokenDataset(path)
+            inputs, targets, weights = dataset.sample_batch_with_loss_weights(
+                2, 1000, random.Random(3)
+            )
+            self.assertEqual(len(inputs[0]), len(inputs[1]))
+            self.assertEqual(len(targets[0]), len(weights[0]))
+            self.assertIn(0.0, weights[0])
+            self.assertIn(1.0, weights[0])
+            for row_targets, row_weights in zip(targets, weights):
+                for target, weight in zip(row_targets, row_weights):
+                    if target == dataset.tokenizer.PAD:
+                        self.assertEqual(weight, 0.0)
+
     def test_raw_text_batch_uses_language_model_windows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

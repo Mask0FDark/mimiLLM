@@ -3,7 +3,9 @@
 import random
 import unittest
 
-from mimillm.generation import generate, generate_text, sample_token
+from mimillm.generation import (
+    generate, generate_response, generate_text, sample_token,
+)
 from mimillm.tensor import Tensor
 from mimillm.tokenizer import ByteTokenizer
 
@@ -55,6 +57,11 @@ class GenerationTests(unittest.TestCase):
             ),
             "hello",
         )
+
+    def test_response_always_uses_the_model_request_prompt(self) -> None:
+        settings = {"max_new_tokens": 2, "temperature": 0.0, "top_k": 1}
+        self.assertEqual(generate_response(_EosModel(), "кто ты", **settings), "")
+        self.assertEqual(generate_response(_EosModel(), "напиши рассказ", **settings), "")
 
 
 if __name__ == "__main__":

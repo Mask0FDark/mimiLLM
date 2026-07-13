@@ -1,5 +1,17 @@
 # Changelog / История изменений
 
+## 0.3.2 — 2026-07-13
+
+- Added one user-facing response API for questions, commands, and writing requests using the same model weights.
+- QA training now computes loss on answers while keeping requests in the attention context.
+- Mixed-length batches use masked padding instead of truncating every sample to the shortest one.
+- Added weighted cross-entropy and matching Python/C++ training tests.
+
+- Добавлен единый интерфейс ответа на вопросы, команды и запросы на написание текста с одними весами модели.
+- При QA-обучении loss теперь считается по ответу, а запрос остаётся в контексте attention.
+- Примеры разной длины дополняются padding с нулевым весом вместо обрезания всего batch до кратчайшего примера.
+- Добавлена weighted cross-entropy и проверки обучения на Python/C++ backend.
+
 ## 0.3.1 — 2026-07-13
 
 - Windows x64 packages now include the threaded C++ backend automatically.

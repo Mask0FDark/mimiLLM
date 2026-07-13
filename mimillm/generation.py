@@ -91,3 +91,15 @@ def generate_text(
     generated = generate(model, prompt_tokens, **settings)  # type: ignore[arg-type]
     continuation = codec.decode(generated)
     return prompt + continuation if include_prompt else continuation
+
+
+def generate_response(
+    model: DecoderTransformer,
+    prompt: str,
+    *,
+    tokenizer: ByteTokenizer | None = None,
+    **settings: object,
+) -> str:
+    """Отвечает на пользовательский запрос через единый prompt модели."""
+    codec = tokenizer or ByteTokenizer()
+    return answer_question(model, codec, prompt, **settings)

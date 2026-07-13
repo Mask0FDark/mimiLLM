@@ -59,21 +59,19 @@ weights/
 └── model.safetensors
 ```
 
-Загрузка и генерация текста:
+Загрузка и использование модели:
 
 ```python
-from mimillm import generate_text, load_model
+from mimillm import generate_response, load_model
 
 model = load_model("weights")
-text = generate_text(
-    model,
-    "Однажды вечером",
-    max_new_tokens=40,
-    temperature=0.7,
-    top_k=20,
-)
-print(text)
+print(generate_response(model, "Кто ты?", max_new_tokens=100))
+print(generate_response(model, "Напиши короткий рассказ", max_new_tokens=200))
 ```
+
+Это одна модель и один набор весов. Любая введённая строка считается запросом
+к LLM. Обычные тексты из `data/text` используются при обучении языка, а не
+включают отдельный пользовательский режим продолжения.
 
 Передавать можно как папку, так и сам файл:
 
@@ -334,11 +332,15 @@ python -m pip install -e .
 ### Load a model
 
 ```python
-from mimillm import generate_text, load_model
+from mimillm import generate_response, load_model
 
 model = load_model("weights")
-print(generate_text(model, "Once upon a time", max_new_tokens=40))
+print(generate_response(model, "Who are you?", max_new_tokens=100))
+print(generate_response(model, "Write a short story", max_new_tokens=200))
 ```
+
+Both calls use the same model and the same weights. Plain text corpora teach
+language during training; they do not create a separate user-facing mode.
 
 The `weights` directory contains `config.json` and `model.safetensors`. You may also pass the `.safetensors` path directly when the config file is next to it.
 

@@ -45,6 +45,13 @@ class AutogradTests(unittest.TestCase):
         logits = Tensor([0.2, -0.1, 0.7, 0.8, 0.1, -0.2], (2, 3), requires_grad=True)
         self.assertGradcheck(lambda: logits.cross_entropy([2, 0]), [logits], tolerance=2e-3)
 
+    def test_weighted_cross_entropy_gradcheck(self) -> None:
+        logits = Tensor([0.2, -0.1, 0.7, 0.8, 0.1, -0.2], (2, 3), requires_grad=True)
+        self.assertGradcheck(
+            lambda: logits.cross_entropy([2, 0], weights=[0.25, 1.0]),
+            [logits], tolerance=2e-3,
+        )
+
     def test_embedding_gradcheck_and_repeated_index(self) -> None:
         table = Tensor([0.2, -0.1, 0.7, 0.8, 0.1, -0.2], (3, 2), requires_grad=True)
         self.assertGradcheck(lambda: table.embedding([1, 1, 2]).mean(), [table])

@@ -30,7 +30,7 @@ class PublicApiTests(unittest.TestCase):
             mimillm.create_model(mimillm.ModelConfig(), d_model=8)
 
     def test_version_and_exports(self) -> None:
-        self.assertEqual(mimillm.__version__, "0.3.1")
+        self.assertEqual(mimillm.__version__, "0.3.2")
         for name in (
             "Tensor", "AdamW", "TokenDataset", "create_model", "load_model",
             "save_model", "train_from_config",

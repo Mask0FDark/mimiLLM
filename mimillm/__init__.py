@@ -11,7 +11,9 @@ from .dataset import (
     load_qa_text,
     load_text_documents,
 )
-from .generation import answer_question, generate, generate_text, sample_token
+from .generation import (
+    answer_question, generate, generate_response, generate_text, sample_token,
+)
 from .layers import Embedding, FeedForward, Linear, RMSNorm, ReLU
 from .losses import cross_entropy
 from .module import Module
@@ -52,6 +54,7 @@ __all__ = [
     "discover_question_files",
     "discover_text_files",
     "generate",
+    "generate_response",
     "generate_text",
     "get_backend",
     "is_grad_enabled",
@@ -71,4 +74,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"

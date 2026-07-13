@@ -326,11 +326,13 @@ def validation_loss(
     total = 0.0
     with no_grad():
         for source, weight in dataset.source_weights():
-            inputs, targets = dataset.deterministic_batch(
+            inputs, targets, loss_weights = dataset.deterministic_batch_with_loss_weights(
                 config.batch_size, config.context_length, source=source
             )
             logits = model(inputs)
-            loss = logits.reshape(-1, config.vocab_size).cross_entropy(flatten(targets)).item()
+            loss = logits.reshape(-1, config.vocab_size).cross_entropy(
+                flatten(targets), weights=flatten(loss_weights)  # type: ignore[arg-type]
+            ).item()
             total += weight * loss
     return total
 
@@ -431,7 +433,7 @@ def train_model(
                 learning_rate=optimizer.learning_rate,
                 batch_seconds=0.0,
             )
-            inputs, targets = train_data.sample_batch(
+            inputs, targets, loss_weights = train_data.sample_batch_with_loss_weights(
                 config.batch_size, config.context_length, rng
             )
             data_finished = time.perf_counter()
@@ -456,7 +458,9 @@ def train_model(
                 learning_rate=optimizer.learning_rate,
                 batch_seconds=forward_finished - started,
             )
-            loss = logits.reshape(-1, config.vocab_size).cross_entropy(flatten(targets))
+            loss = logits.reshape(-1, config.vocab_size).cross_entropy(
+                flatten(targets), weights=flatten(loss_weights)  # type: ignore[arg-type]
+            )
             loss_value = loss.item()
             loss_finished = time.perf_counter()
             progress.stage(

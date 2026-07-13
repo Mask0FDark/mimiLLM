@@ -114,6 +114,10 @@ class TokenDataset:
             self.tokenizer.encode_qa(question, answer)
             for question, answer in self.examples
         ]
+        self.qa_answer_starts = {
+            id(sequence): len(self.tokenizer.encode_prompt(question))
+            for sequence, (question, _) in zip(self.sequences, self.examples)
+        }
         self.text_documents = load_text_documents(text_paths) if text_paths is not None else []
         self.text_sequences = [
             self.tokenizer.encode(text, add_bos=True, add_eos=True)
@@ -178,6 +182,79 @@ class TokenDataset:
             targets.append(window[1:])
         return inputs, targets
 
+    def sample_batch_with_loss_weights(
+        self, batch_size: int, context_length: int, rng: random.Random,
+    ) -> tuple[list[list[int]], list[list[int]], list[list[float]]]:
+        """Создаёт padded batch и обучает QA только на токенах ответа.
+
+        Токены вопроса остаются во входном контексте, но не входят в loss.
+        У обычного текста вес имеют все настоящие цели. Padding всегда имеет
+        нулевой вес, поэтому примеры разной длины не обрезаются до кратчайшего.
+        """
+        if batch_size <= 0 or context_length <= 0:
+            raise ValueError("batch_size и context_length должны быть положительными")
+        source = self._choose_source(rng)
+        selected = self._choose_sequences(source, batch_size, context_length, rng)
+        self.last_source = source
+        return self._batch_with_loss_weights(
+            selected, source, context_length, rng=rng,
+        )
+
+    def _batch_with_loss_weights(
+        self,
+        selected: list[list[int]],
+        source: str,
+        context_length: int,
+        *,
+        rng: random.Random | None = None,
+        offset: int = 0,
+    ) -> tuple[list[list[int]], list[list[int]], list[list[float]]]:
+        window_size = min(context_length + 1, max(len(sequence) for sequence in selected))
+        row_size = window_size - 1
+        inputs: list[list[int]] = []
+        targets: list[list[int]] = []
+        loss_weights: list[list[float]] = []
+        for index, sequence in enumerate(selected):
+            actual_size = min(window_size, len(sequence))
+            maximum_start = len(sequence) - actual_size
+            if source == "qa":
+                answer_start = self.qa_answer_starts[id(sequence)]
+                earliest_answer_window = max(0, answer_start - actual_size + 1)
+                latest_context_window = min(maximum_start, max(0, answer_start - 1))
+                if rng is None:
+                    start = earliest_answer_window
+                elif maximum_start == 0:
+                    start = 0
+                elif answer_start < actual_size and rng.random() < 0.7:
+                    start = 0
+                else:
+                    start = rng.randint(earliest_answer_window, latest_context_window)
+            else:
+                if rng is None:
+                    start = ((offset + index) * context_length) % (maximum_start + 1)
+                else:
+                    start = 0 if maximum_start == 0 else rng.randint(0, maximum_start)
+                answer_start = 0
+            window = sequence[start:start + actual_size]
+            row_inputs = window[:-1]
+            row_targets = window[1:]
+            if source == "qa":
+                row_weights = [
+                    1.0 if absolute_position >= answer_start else 0.0
+                    for absolute_position in range(start + 1, start + actual_size)
+                ]
+            else:
+                row_weights = [1.0] * len(row_targets)
+            padding = row_size - len(row_inputs)
+            if padding:
+                row_inputs.extend([self.tokenizer.PAD] * padding)
+                row_targets.extend([self.tokenizer.PAD] * padding)
+                row_weights.extend([0.0] * padding)
+            inputs.append(row_inputs)
+            targets.append(row_targets)
+            loss_weights.append(row_weights)
+        return inputs, targets, loss_weights
+
     def deterministic_batch(
         self, batch_size: int, context_length: int, offset: int = 0, *,
         source: str | None = None,
@@ -199,3 +276,19 @@ class TokenDataset:
             inputs.append(window[:-1])
             targets.append(window[1:])
         return inputs, targets
+
+    def deterministic_batch_with_loss_weights(
+        self, batch_size: int, context_length: int, offset: int = 0, *,
+        source: str | None = None,
+    ) -> tuple[list[list[int]], list[list[int]], list[list[float]]]:
+        """Воспроизводимый weighted batch для validation high-level обучения."""
+        if batch_size <= 0 or context_length <= 0:
+            raise ValueError("batch_size и context_length должны быть положительными")
+        selected_source = source or self.source_weights()[0][0]
+        if selected_source not in {name for name, _ in self.source_weights()}:
+            raise ValueError(f"источник {selected_source!r} отсутствует или имеет нулевой вес")
+        sequences = self.text_sequences if selected_source == "text" else self.sequences
+        selected = [sequences[(offset + index) % len(sequences)] for index in range(batch_size)]
+        return self._batch_with_loss_weights(
+            selected, selected_source, context_length, offset=offset,
+        )

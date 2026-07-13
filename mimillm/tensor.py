@@ -714,8 +714,15 @@ class Tensor:
         output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
-    def cross_entropy(self, targets: Sequence[int]) -> "Tensor":
-        """Средняя cross-entropy для logits формы (..., classes)."""
+    def cross_entropy(
+        self, targets: Sequence[int], *, weights: Sequence[float] | None = None,
+    ) -> "Tensor":
+        """Средняя cross-entropy для logits формы (..., classes).
+
+        ``weights`` задаёт вес каждой строки logits. Нулевой вес исключает
+        позицию из loss и backward; это используется для padding и prompt
+        части обучающих пар вопрос–ответ.
+        """
         if self.ndim < 2:
             raise ValueError("cross_entropy ожидает logits минимум с двумя осями")
         classes = self.shape[-1]
@@ -725,11 +732,44 @@ class Tensor:
             raise ValueError(f"ожидалось {rows} target, получено {len(checked)}")
         if any(target < 0 or target >= classes for target in checked):
             raise IndexError("target вне диапазона классов")
+        checked_weights: list[float] | None = None
+        weight_sum = float(rows)
+        if weights is not None:
+            checked_weights = [float(weight) for weight in weights]
+            if len(checked_weights) != rows:
+                raise ValueError(f"ожидалось {rows} weights, получено {len(checked_weights)}")
+            if any(not math.isfinite(weight) or weight < 0.0 for weight in checked_weights):
+                raise ValueError("weights должны быть конечными и неотрицательными")
+            weight_sum = sum(checked_weights)
+            if weight_sum <= 0.0:
+                raise ValueError("хотя бы один weight должен быть положительным")
         selected_backend = get_backend()
-        loss = selected_backend.cross_entropy(self.data, checked, rows, classes)
+        if checked_weights is None:
+            loss = selected_backend.cross_entropy(self.data, checked, rows, classes)
+        else:
+            loss_sum = 0.0
+            for row, (target, weight) in enumerate(zip(checked, checked_weights)):
+                if weight == 0.0:
+                    continue
+                offset = row * classes
+                maximum = max(self.data[offset:offset + classes])
+                exponential_sum = sum(
+                    math.exp(float(value) - maximum)
+                    for value in self.data[offset:offset + classes]
+                )
+                loss_sum += weight * (
+                    maximum + math.log(exponential_sum) - self.data[offset + target]
+                )
+            loss = loss_sum / weight_sum
         base_gradient = selected_backend.cross_entropy_backward(
             self.data, checked, rows, classes
         ) if self.requires_grad else None
+        if base_gradient is not None and checked_weights is not None:
+            for row, weight in enumerate(checked_weights):
+                scale = weight * rows / weight_sum
+                offset = row * classes
+                for column in range(classes):
+                    base_gradient[offset + column] *= scale
         output = Tensor([loss], (), requires_grad=self.requires_grad, parents=(self,), operation="cross_entropy")
 
         def backward_fn() -> None:
