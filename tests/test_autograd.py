@@ -5,10 +5,22 @@ import unittest
 
 from minillm.autograd import gradcheck
 from minillm.layers import Linear
-from minillm.tensor import Tensor
+from minillm.tensor import Tensor, is_grad_enabled, no_grad
 
 
 class AutogradTests(unittest.TestCase):
+    def test_no_grad_disables_graph_and_restores_state(self) -> None:
+        value = Tensor([2.0], requires_grad=True)
+        self.assertTrue(is_grad_enabled())
+        with no_grad():
+            self.assertFalse(is_grad_enabled())
+            output = value * value + 1.0
+            self.assertFalse(output.requires_grad)
+            self.assertEqual(output.parents, ())
+        self.assertTrue(is_grad_enabled())
+        tracked = value * value
+        self.assertTrue(tracked.requires_grad)
+
     def assertGradcheck(self, function, tensors, tolerance: float = 4e-3) -> None:
         passed, error = gradcheck(function, tensors, tolerance=tolerance)
         self.assertTrue(passed, f"максимальная ошибка градиента {error}")
@@ -52,4 +64,3 @@ class AutogradTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

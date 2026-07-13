@@ -8,6 +8,7 @@ from pathlib import Path
 
 from minillm.checkpoint import load_checkpoint
 from minillm.dataset import TokenDataset
+from minillm.tensor import no_grad
 from minillm.transformer import DecoderTransformer, TransformerConfig
 from minillm.utils import flatten
 
@@ -32,13 +33,14 @@ def main() -> None:
     dataset = TokenDataset(args.data, text_paths=args.text_data, text_ratio=text_ratio)
     total_loss = 0.0
     details: list[str] = []
-    for source, weight in dataset.source_weights():
-        inputs, targets = dataset.deterministic_batch(
-            config.batch_size, config.context_length, source=source
-        )
-        loss = model(inputs).reshape(-1, config.vocab_size).cross_entropy(flatten(targets)).item()
-        total_loss += weight * loss
-        details.append(f"{source}_loss={loss:.6f}")
+    with no_grad():
+        for source, weight in dataset.source_weights():
+            inputs, targets = dataset.deterministic_batch(
+                config.batch_size, config.context_length, source=source
+            )
+            loss = model(inputs).reshape(-1, config.vocab_size).cross_entropy(flatten(targets)).item()
+            total_loss += weight * loss
+            details.append(f"{source}_loss={loss:.6f}")
     print(
         f"validation_loss={total_loss:.6f} {' '.join(details)} "
         f"qa_examples={len(dataset.examples)} text_documents={len(dataset.text_documents)} "

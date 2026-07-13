@@ -6,6 +6,7 @@ import math
 import random
 from collections.abc import Sequence
 
+from .tensor import no_grad
 from .transformer import DecoderTransformer
 from .tokenizer import ByteTokenizer
 
@@ -51,16 +52,17 @@ def generate(
     source = rng or random.Random()
     tokens = list(prompt_tokens)
     generated: list[int] = []
-    for _ in range(max_new_tokens):
-        context = tokens[-model.config.context_length:]
-        logits = model([context])
-        start = (len(context) - 1) * model.config.vocab_size
-        row = logits.data[start:start + model.config.vocab_size]
-        token = sample_token(row, temperature=temperature, top_k=top_k, rng=source)
-        tokens.append(token)
-        if token == eos_token:
-            break
-        generated.append(token)
+    with no_grad():
+        for _ in range(max_new_tokens):
+            context = tokens[-model.config.context_length:]
+            logits = model([context])
+            start = (len(context) - 1) * model.config.vocab_size
+            row = logits.data[start:start + model.config.vocab_size]
+            token = sample_token(row, temperature=temperature, top_k=top_k, rng=source)
+            tokens.append(token)
+            if token == eos_token:
+                break
+            generated.append(token)
     return generated
 
 
@@ -71,4 +73,3 @@ def answer_question(
     prompt = tokenizer.encode_prompt(question)
     generated = generate(model, prompt, **settings)  # type: ignore[arg-type]
     return tokenizer.decode(generated).strip()
-

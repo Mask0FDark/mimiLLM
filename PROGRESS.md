@@ -23,8 +23,8 @@
 ## Проверенные платформы
 
 - Windows 11 x86-64, Conda Python 3.12, MinGW-w64 GCC 15.2: release DLL собрана,
-  61/61 тестов прошли с C++ backend и 61/61 с Python fallback.
-- WSL Ubuntu x86-64, Python 3.12, GCC 13.3: release `.so` собрана, 61/61 тестов
+  62/62 теста прошли с C++ backend и 62/62 с Python fallback.
+- WSL Ubuntu x86-64, Python 3.12, GCC 13.3: release `.so` собрана, 62/62 теста
   прошли с C++ backend.
 - Linux AArch64 поддерживается переносимым исходным кодом и флагами, но в этой
   сессии физическая ARM64-машина не была доступна для запуска.

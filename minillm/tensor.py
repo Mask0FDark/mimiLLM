@@ -5,10 +5,31 @@ from __future__ import annotations
 import math
 import random
 from array import array
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 from .backend import get_backend
+
+
+_GRAD_ENABLED = True
+
+
+def is_grad_enabled() -> bool:
+    """Сообщает, строят ли новые операции динамический граф."""
+    return _GRAD_ENABLED
+
+
+@contextmanager
+def no_grad() -> Iterator[None]:
+    """Временно отключает граф для validation и авторегрессионного inference."""
+    global _GRAD_ENABLED
+    previous = _GRAD_ENABLED
+    _GRAD_ENABLED = False
+    try:
+        yield
+    finally:
+        _GRAD_ENABLED = previous
 
 
 def _product(shape: Sequence[int]) -> int:
@@ -118,7 +139,7 @@ class Tensor:
         self.data = array("f", data)
         self.shape = _normalize_shape(shape, len(self.data))
         self.strides = _contiguous_strides(self.shape)
-        self.requires_grad = bool(requires_grad)
+        self.requires_grad = bool(requires_grad and _GRAD_ENABLED)
         self.grad: array | None = None
         self.parents = parents if self.requires_grad else ()
         self._backward_fn = backward_fn
@@ -305,7 +326,7 @@ class Tensor:
                     grad[right_map[i]] += upstream * grad_right(self.data[left_map[i]], right.data[right_map[i]])
                 right._accumulate_grad(grad)
 
-        output._backward_fn = backward_fn if requires_grad else None
+        output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
     def __add__(self, other: Any) -> "Tensor":
@@ -352,7 +373,7 @@ class Tensor:
                 output.grad[i] * derivative(self.data[i], output.data[i]) for i in range(self.numel)
             )))
 
-        output._backward_fn = backward_fn if self.requires_grad else None
+        output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
     def exp(self) -> "Tensor":
@@ -379,7 +400,7 @@ class Tensor:
             assert output.grad is not None
             self._accumulate_grad(selected_backend.relu_backward(self.data, output.grad))
 
-        output._backward_fn = backward_fn if self.requires_grad else None
+        output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
     def reshape(self, *shape: int | Sequence[int]) -> "Tensor":
@@ -399,7 +420,7 @@ class Tensor:
             assert output.grad is not None
             self._accumulate_grad(output.grad)
 
-        output._backward_fn = backward_fn if self.requires_grad else None
+        output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
     def permute(self, axes: Sequence[int]) -> "Tensor":
@@ -429,7 +450,7 @@ class Tensor:
                 grad[source_index] += output.grad[out_index]
             self._accumulate_grad(grad)
 
-        output._backward_fn = backward_fn if self.requires_grad else None
+        output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
     def transpose(self, dim0: int = -2, dim1: int = -1) -> "Tensor":
@@ -483,7 +504,7 @@ class Tensor:
             assert output.grad is not None
             self._accumulate_grad(array("f", (output.grad[group] for group in groups)))
 
-        output._backward_fn = backward_fn if self.requires_grad else None
+        output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
     def mean(self, axis: int | None = None, *, keepdims: bool = False) -> "Tensor":
@@ -558,7 +579,7 @@ class Tensor:
                     )
                 right._accumulate_grad(grad_right)
 
-        output._backward_fn = backward_fn if requires_grad else None
+        output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
     def __matmul__(self, right: "Tensor") -> "Tensor":
@@ -588,7 +609,7 @@ class Tensor:
                     grad[offset + column] = output.data[offset + column] * (output.grad[offset + column] - dot)
             self._accumulate_grad(grad)
 
-        output._backward_fn = backward_fn if self.requires_grad else None
+        output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
     def embedding(self, indices: Sequence[int]) -> "Tensor":
@@ -613,7 +634,7 @@ class Tensor:
             )
             self._accumulate_grad(grad)
 
-        output._backward_fn = backward_fn if self.requires_grad else None
+        output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
     def cross_entropy(self, targets: Sequence[int]) -> "Tensor":
@@ -643,5 +664,5 @@ class Tensor:
                 grad[i] *= scale
             self._accumulate_grad(grad)
 
-        output._backward_fn = backward_fn if self.requires_grad else None
+        output._backward_fn = backward_fn if output.requires_grad else None
         return output

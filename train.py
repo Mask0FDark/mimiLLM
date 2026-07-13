@@ -14,6 +14,7 @@ from minillm.backend import get_backend
 from minillm.checkpoint import load_checkpoint, save_checkpoint
 from minillm.dataset import TokenDataset
 from minillm.optim import AdamW
+from minillm.tensor import no_grad
 from minillm.transformer import DecoderTransformer, TransformerConfig
 from minillm.utils import flatten, learning_rate_at
 
@@ -26,13 +27,14 @@ DEFAULT_TEXT_VALIDATION = ROOT / "data" / "text" / "validation"
 def validation_loss(model: DecoderTransformer, dataset: TokenDataset, config: TransformerConfig) -> float:
     """Считает взвешенный QA/text validation на детерминированных batch."""
     total = 0.0
-    for source, weight in dataset.source_weights():
-        inputs, targets = dataset.deterministic_batch(
-            config.batch_size, config.context_length, source=source
-        )
-        logits = model(inputs)
-        loss = logits.reshape(-1, config.vocab_size).cross_entropy(flatten(targets)).item()
-        total += weight * loss
+    with no_grad():
+        for source, weight in dataset.source_weights():
+            inputs, targets = dataset.deterministic_batch(
+                config.batch_size, config.context_length, source=source
+            )
+            logits = model(inputs)
+            loss = logits.reshape(-1, config.vocab_size).cross_entropy(flatten(targets)).item()
+            total += weight * loss
     return total
 
 
