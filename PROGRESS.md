@@ -21,14 +21,16 @@
   сохранение и безопасный бинарный checkpoint с полным resume.
 - Добавлены greedy/temperature/top-k генерация, EOS stopping и терминальный чат
   с командами; ответы всегда порождаются logits модели.
+- Добавлен benchmark Python/C++ 1/несколько потоков, forward и training step;
+  код проверен на отсутствие x86 intrinsics, assembly и `-march=native` по умолчанию.
 
 ## Сейчас выполняется
 
-- Этап 8: benchmark и проверка переносимости.
+- Этап 9: полный тестовый прогон, QA/debug запуск и финальная документация.
 
 ## Осталось
 
-- Benchmark, документация и финальный прогон.
+- Финальная документация, полный прогон и короткое QA-обучение.
 
 ## Известные проблемы
 
@@ -47,4 +49,6 @@
   снизился более чем на 60%, resume выполнил следующий шаг.
 - Debug training: train loss 5.56502 → 5.26042, validation loss 5.32062.
 - Generation: 3 теста, OK; интерактивный запуск и корректный `/exit` проверены.
+- Linux benchmark 64×64: Python 0.024898 s, C++/1 поток 0.000149 s,
+  C++/4 потока 0.000360 s (малый размер не окупает thread-pool overhead).
 - `python tools/make_dataset.py`: train=76, validation=14.
