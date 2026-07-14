@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import threading
 import unittest
 import warnings
 from pathlib import Path
@@ -62,6 +63,22 @@ class BackendSelectionTests(unittest.TestCase):
             expected = Path(directory) / "custom-backend.dll"
             with patch.dict(os.environ, {"MIMILLM_BACKEND_LIBRARY": str(expected)}):
                 self.assertEqual(default_library_path(), expected.resolve())
+
+    def test_backend_scope_is_local_to_one_thread(self) -> None:
+        main_backend = SimpleNamespace(name="main")
+        worker_backend = SimpleNamespace(name="worker")
+        backend._backend = main_backend
+        observed: list[str] = []
+
+        def worker() -> None:
+            with backend.backend_scope(worker_backend):
+                observed.append(backend.get_backend().name)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+        self.assertEqual(observed, ["worker"])
+        self.assertIs(backend.get_backend(), main_backend)
 
 
 if __name__ == "__main__":

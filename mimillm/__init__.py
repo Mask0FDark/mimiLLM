@@ -2,7 +2,7 @@
 
 from .api import LanguageModel, ModelConfig, create_model, load_model, save_model
 from .attention import MultiHeadCausalSelfAttention
-from .backend import get_backend, reset_backend
+from .backend import backend_scope, get_backend, reset_backend
 from .backend_cuda import CudaBackend, is_available as cuda_is_available
 from .checkpoint import CheckpointData, load_checkpoint, save_checkpoint
 from .dataset import (
@@ -15,6 +15,7 @@ from .dataset import (
 from .generation import (
     answer_question, generate, generate_response, generate_text, sample_token,
 )
+from .hybrid import HybridBatchResult, HybridDataParallel, HybridWorkerResult
 from .layers import Embedding, FeedForward, Linear, RMSNorm, ReLU
 from .losses import cross_entropy
 from .module import Module
@@ -35,6 +36,9 @@ __all__ = [
     "DecoderTransformer",
     "Embedding",
     "FeedForward",
+    "HybridBatchResult",
+    "HybridDataParallel",
+    "HybridWorkerResult",
     "LanguageModel",
     "Linear",
     "ModelConfig",
@@ -52,6 +56,7 @@ __all__ = [
     "TrainingResult",
     "UnicodeByteTokenizer",
     "answer_question",
+    "backend_scope",
     "create_model",
     "create_tokenizer",
     "cross_entropy",
@@ -79,4 +84,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0.dev0"

@@ -6,6 +6,7 @@ import ctypes
 import os
 import shutil
 import sys
+import threading
 from array import array
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
@@ -213,6 +214,8 @@ class _CudaRuntime:
         )
         self._functions: dict[str, ctypes.c_void_p] = {}
         self._pool: dict[int, list[int]] = defaultdict(list)
+        self._active_thread = threading.local()
+        self._active_thread.current = True
 
     def _configure_driver(self) -> None:
         driver = self.driver
@@ -222,6 +225,7 @@ class _CudaRuntime:
         driver.cuDeviceGetAttribute.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int]
         driver.cuDeviceTotalMem_v2.argtypes = [ctypes.POINTER(ctypes.c_size_t), ctypes.c_int]
         driver.cuCtxCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint, ctypes.c_int]
+        driver.cuCtxSetCurrent.argtypes = [ctypes.c_void_p]
         driver.cuModuleLoadDataEx.argtypes = [
             ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_uint,
             ctypes.c_void_p, ctypes.c_void_p,
@@ -243,6 +247,13 @@ class _CudaRuntime:
         ]
         driver.cuCtxSynchronize.argtypes = []
         driver.cuGetErrorString.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
+
+    def activate(self) -> None:
+        """Makes this runtime's CUDA context current in the calling thread."""
+        if getattr(self._active_thread, "current", False):
+            return
+        self._check(self.driver.cuCtxSetCurrent(self.context), "cuCtxSetCurrent")
+        self._active_thread.current = True
 
     def _check(self, status: int, operation: str) -> None:
         if status == CUDA_SUCCESS:
@@ -276,6 +287,7 @@ class _CudaRuntime:
         return int(output.value)
 
     def function(self, name: str) -> ctypes.c_void_p:
+        self.activate()
         if name not in self._functions:
             result = ctypes.c_void_p()
             self._check(
@@ -288,6 +300,7 @@ class _CudaRuntime:
         return self._functions[name]
 
     def allocate(self, size: int) -> int:
+        self.activate()
         size = max(1, int(size))
         if self._pool[size]:
             return self._pool[size].pop()
@@ -309,6 +322,7 @@ class _CudaRuntime:
                 self.release(pointer, size)
 
     def upload(self, pointer: int, storage: array) -> None:
+        self.activate()
         size = len(storage) * storage.itemsize
         if not size:
             return
@@ -319,6 +333,7 @@ class _CudaRuntime:
         )
 
     def download(self, storage: array, pointer: int) -> None:
+        self.activate()
         size = len(storage) * storage.itemsize
         if not size:
             return
@@ -329,12 +344,14 @@ class _CudaRuntime:
         )
 
     def zero(self, pointer: int, size: int) -> None:
+        self.activate()
         self._check(self.driver.cuMemsetD8_v2(pointer, 0, size), "cuMemsetD8")
 
     def launch(
         self, name: str, grid: tuple[int, int, int], block: tuple[int, int, int],
         arguments: Sequence[ctypes._SimpleCData], *, shared_memory: int = 0,
     ) -> None:
+        self.activate()
         pointers = (ctypes.c_void_p * len(arguments))(*(
             ctypes.cast(ctypes.byref(argument), ctypes.c_void_p) for argument in arguments
         ))

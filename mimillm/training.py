@@ -384,6 +384,9 @@ def train_model(
     base_dir: str | Path = ".",
     output_dir: str | Path = "weights",
     resume: str | Path | None = None,
+    hybrid: bool | None = None,
+    hybrid_cpu_batch_size: int | None = None,
+    hybrid_cpu_threads: int | None = None,
 ) -> TrainingResult:
     """Trains from configured project data and exports standard reusable weights."""
     project_dir = Path(base_dir).resolve()
@@ -433,13 +436,48 @@ def train_model(
         )
 
     backend = get_backend()
-    backend_name = getattr(backend, "name", "python")
-    if backend_name == "cuda":
+    selected_backend_name = getattr(backend, "name", "python")
+    hybrid_enabled = (
+        os.environ.get("MIMILLM_BACKEND", "auto").lower() == "hybrid"
+        if hybrid is None else hybrid
+    )
+    hybrid_runner = None
+    if hybrid_enabled:
+        if selected_backend_name != "cuda":
+            raise RuntimeError("hybrid training requires an available CUDA backend")
+        from .hybrid import HybridDataParallel
+
+        cpu_batch_size = (
+            int(os.environ.get("MIMILLM_HYBRID_CPU_BATCH", "1"))
+            if hybrid_cpu_batch_size is None else hybrid_cpu_batch_size
+        )
+        cpu_threads = (
+            int(os.environ.get("MIMILLM_HYBRID_CPU_THREADS", "4"))
+            if hybrid_cpu_threads is None else hybrid_cpu_threads
+        )
+        if not 0 < cpu_batch_size < config.batch_size:
+            raise ValueError("hybrid CPU batch must be between 1 and batch_size - 1")
+        hybrid_runner = HybridDataParallel(
+            model,
+            cpu_batch_size=cpu_batch_size,
+            cpu_threads=cpu_threads,
+            gpu_backend=backend,
+        )
+        backend_name = "cpu+gpu"
+        backend_details = (
+            f"device={getattr(backend, 'device_name', 'NVIDIA GPU')} | "
+            f"gpu_batch={config.batch_size - cpu_batch_size} | "
+            f"cpu_batch={cpu_batch_size} | "
+            f"cpu_threads={hybrid_runner.cpu_threads}"
+        )
+    elif selected_backend_name == "cuda":
+        backend_name = selected_backend_name
         backend_details = (
             f"device={getattr(backend, 'device_name', 'NVIDIA GPU')} | "
             f"vram={getattr(backend, 'device_memory', 0) / (1024 ** 3):.1f}GB"
         )
     else:
+        backend_name = selected_backend_name
         backend_details = f"threads={getattr(backend, 'num_threads', 1)}"
     batches_per_epoch = _batches_per_epoch(train_data, config)
     total_epochs = math.ceil(config.steps / batches_per_epoch)
@@ -507,34 +545,56 @@ def train_model(
                 learning_rate=optimizer.learning_rate,
                 batch_seconds=data_finished - started,
             )
-            logits = model(inputs)
-            forward_finished = time.perf_counter()
-            progress.stage(
-                step,
-                phase="loss",
-                source=train_data.last_source,
-                tokens=tokens,
-                validation_loss=latest_validation_loss,
-                learning_rate=optimizer.learning_rate,
-                batch_seconds=forward_finished - started,
-            )
-            loss = logits.reshape(-1, config.vocab_size).cross_entropy(
-                flatten(targets), weights=flatten(loss_weights)  # type: ignore[arg-type]
-            )
-            loss_value = loss.item()
-            loss_finished = time.perf_counter()
-            progress.stage(
-                step,
-                phase="backward",
-                source=train_data.last_source,
-                tokens=tokens,
-                train_loss=loss_value,
-                validation_loss=latest_validation_loss,
-                learning_rate=optimizer.learning_rate,
-                batch_seconds=loss_finished - started,
-            )
-            loss.backward()
-            backward_finished = time.perf_counter()
+            if hybrid_runner is None:
+                logits = model(inputs)
+                forward_finished = time.perf_counter()
+                progress.stage(
+                    step,
+                    phase="loss",
+                    source=train_data.last_source,
+                    tokens=tokens,
+                    validation_loss=latest_validation_loss,
+                    learning_rate=optimizer.learning_rate,
+                    batch_seconds=forward_finished - started,
+                )
+                loss = logits.reshape(-1, config.vocab_size).cross_entropy(
+                    flatten(targets), weights=flatten(loss_weights)  # type: ignore[arg-type]
+                )
+                loss_value = loss.item()
+                loss_finished = time.perf_counter()
+                progress.stage(
+                    step,
+                    phase="backward",
+                    source=train_data.last_source,
+                    tokens=tokens,
+                    train_loss=loss_value,
+                    validation_loss=latest_validation_loss,
+                    learning_rate=optimizer.learning_rate,
+                    batch_seconds=loss_finished - started,
+                )
+                loss.backward()
+                backward_finished = time.perf_counter()
+            else:
+                progress.stage(
+                    step,
+                    phase="gpu+cpu",
+                    source=train_data.last_source,
+                    tokens=tokens,
+                    validation_loss=latest_validation_loss,
+                    learning_rate=optimizer.learning_rate,
+                    batch_seconds=data_finished - started,
+                )
+                hybrid_result = hybrid_runner.forward_backward(
+                    inputs, targets, loss_weights,
+                )
+                loss_value = hybrid_result.loss
+                forward_seconds = max(
+                    hybrid_result.gpu.forward_seconds,
+                    hybrid_result.cpu.forward_seconds,
+                )
+                forward_finished = data_finished + forward_seconds
+                loss_finished = forward_finished
+                backward_finished = time.perf_counter()
             progress.stage(
                 step,
                 phase="optimizer",
@@ -548,6 +608,8 @@ def train_model(
             gradient_norm = optimizer.clip_grad_norm(1.0)
             optimizer.step()
             optimizer.zero_grad()
+            if hybrid_runner is not None:
+                hybrid_runner.sync_replica()
             optimizer_finished = time.perf_counter()
             last_step = step
             elapsed = optimizer_finished - started
@@ -665,6 +727,9 @@ def train_model(
         if best_validation_step < 0:
             save_model(destination, model)
         print(f"Training interrupted at step {last_step}. Saved: {checkpoint_path}", flush=True)
+    finally:
+        if hybrid_runner is not None:
+            hybrid_runner.close()
 
     if not interrupted:
         progress.close_line()
@@ -699,6 +764,8 @@ def train_from_config(
     steps: int | None = None,
     batches_per_epoch: int | None = None,
     backend: str | None = None,
+    hybrid_cpu_batch_size: int | None = None,
+    hybrid_cpu_threads: int | None = None,
 ) -> TrainingResult:
     """Loads JSON config; relative data paths are based on the config's directory."""
     path = Path(config_path).resolve()
@@ -711,10 +778,12 @@ def train_from_config(
         if batches_per_epoch <= 0:
             raise ValueError("batches_per_epoch must be positive")
         config = replace(config, batches_per_epoch=batches_per_epoch)
+    hybrid: bool | None = None
     if backend is not None:
         selected = backend.lower()
-        if selected not in {"auto", "cuda", "cpp", "python"}:
-            raise ValueError("backend must be auto, cuda, cpp, or python")
+        if selected not in {"auto", "hybrid", "cuda", "cpp", "python"}:
+            raise ValueError("backend must be auto, hybrid, cuda, cpp, or python")
+        hybrid = selected == "hybrid"
         os.environ["MIMILLM_BACKEND"] = selected
         reset_backend()
     return train_model(
@@ -722,6 +791,9 @@ def train_from_config(
         base_dir=path.parent,
         output_dir=output_dir,
         resume=resume,
+        hybrid=hybrid,
+        hybrid_cpu_batch_size=hybrid_cpu_batch_size,
+        hybrid_cpu_threads=hybrid_cpu_threads,
     )
 
 
@@ -751,8 +823,16 @@ def main(
         help="number of optimizer batches grouped into one displayed epoch",
     )
     parser.add_argument(
-        "--backend", choices=("auto", "cuda", "cpp", "python"),
+        "--backend", choices=("auto", "hybrid", "cuda", "cpp", "python"),
         help="compute backend; defaults to MIMILLM_BACKEND or auto",
+    )
+    parser.add_argument(
+        "--hybrid-cpu-batch-size", type=int,
+        help="examples per batch assigned to CPU in hybrid mode (default: 1)",
+    )
+    parser.add_argument(
+        "--hybrid-cpu-threads", type=int,
+        help="C++ worker threads used in hybrid mode (default: 4)",
     )
     args = parser.parse_args()
     output_dir = (
@@ -769,6 +849,8 @@ def main(
         steps=args.steps,
         batches_per_epoch=args.batches_per_epoch,
         backend=args.backend,
+        hybrid_cpu_batch_size=args.hybrid_cpu_batch_size,
+        hybrid_cpu_threads=args.hybrid_cpu_threads,
     )
     print(f"Weights: {result.weights_dir}")
     print(f"Training checkpoint: {result.checkpoint_path}")

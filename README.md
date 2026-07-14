@@ -309,6 +309,39 @@ result = train_from_config("config.json", output_dir="weights", backend="cuda")
 
 CUDA backend реализует forward и backward операции, matmul, attention, softmax, embedding, masked cross-entropy, gradient clipping и AdamW. Граф autograd и цикл обучения остаются общими для всех backend.
 
+### Экспериментальный CPU+GPU
+
+В ветке `experiment/cpu-gpu` есть data-parallel режим `hybrid`. Он держит две одинаковые копии модели, считает большую часть batch на CUDA, один пример — в C++ CPU, затем объединяет градиенты с учётом числа supervised-токенов. AdamW по-прежнему делает одно обновление, поэтому формат весов и checkpoint не меняется.
+
+PowerShell:
+
+```powershell
+$env:MIMILLM_BACKEND = "hybrid"
+$env:MIMILLM_HYBRID_CPU_BATCH = "1"
+$env:MIMILLM_HYBRID_CPU_THREADS = "4"
+python train.py
+```
+
+Тот же режим через API:
+
+```python
+train_from_config(
+    "config.json",
+    output_dir="weights",
+    backend="hybrid",
+    hybrid_cpu_batch_size=1,
+    hybrid_cpu_threads=4,
+)
+```
+
+Режим требует одновременно CUDA и C++ backend, а `batch_size` должен быть не меньше 2. Больше CPU-потоков не всегда быстрее: они конкурируют с CUDA за память и за время Python-потока. На RTX 3050 Laptop фиксированный длинный batch иногда ускорялся примерно на 10%, но повторяемые прогоны по реальным batch m0fdii разной длины оказались примерно на 6–11% медленнее чистой CUDA. Поэтому это опциональный эксперимент, а не новый режим `auto`.
+
+Перед долгим запуском можно проверить оба режима на настоящих batch своего проекта:
+
+```powershell
+python tools/benchmark_hybrid.py E:\m0fdii\config.json --batches 6
+```
+
 ### C++ и Python
 
 Установка через pip на Windows x64 содержит готовую C++ DLL. Ручная сборка нужна только при изменении C++-исходников:
@@ -327,7 +360,7 @@ export MIMILLM_BACKEND=cpp
 
 Доступные переменные окружения:
 
-- `MIMILLM_BACKEND=auto|cuda|cpp|python` — выбор backend;
+- `MIMILLM_BACKEND=auto|hybrid|cuda|cpp|python` — выбор backend;
 - `MIMILLM_DISABLE_CUDA=1` — пропустить CUDA только при автоматическом выборе;
 - `MIMILLM_NUM_THREADS=N` — число рабочих потоков C++;
 - `MIMILLM_CPP_LIBRARY=/path/to/library` — явный путь к DLL или `.so`.
@@ -450,6 +483,10 @@ The default `auto` mode selects CUDA first, then threaded C++, then pure Python.
 On Windows x64, the threaded C++ backend is bundled with the package and installed automatically by pip; no separate compiler or build command is required.
 
 CUDA mode requires an NVIDIA GPU, a compatible driver, and the NVIDIA CUDA Toolkit with NVRTC. This system dependency is explicit; CPU modes do not require it. Visual Studio, `cl.exe`, PyTorch, and TensorFlow are not required. NVRTC compiles the bundled kernels when CUDA is first selected in a process, and the NVIDIA Driver API loads them directly.
+
+The experimental `experiment/cpu-gpu` branch also provides `backend="hybrid"`. It runs one model replica on CUDA and another on the threaded C++ backend, splits each batch between them, and combines gradients by supervised-token weight before one AdamW update. The defaults assign one sample and four threads to CPU; they can be changed with `hybrid_cpu_batch_size`, `hybrid_cpu_threads`, `MIMILLM_HYBRID_CPU_BATCH`, and `MIMILLM_HYBRID_CPU_THREADS`.
+
+This mode is hardware- and batch-shape-dependent. On the tested RTX 3050 Laptop system it was about 10% faster for some fixed long batches, but repeated runs over real mixed-length m0fdii batches were about 6–11% slower than CUDA alone. It is intentionally opt-in and does not replace CUDA in `auto` mode.
 
 ```bash
 MIMILLM_BACKEND=cuda python train.py

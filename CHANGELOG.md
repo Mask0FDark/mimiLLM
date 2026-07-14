@@ -1,5 +1,23 @@
 # Changelog / История изменений
 
+## 0.6.0.dev0 — CPU+GPU experiment
+
+### English
+
+- Added opt-in CPU+GPU data-parallel training on the `experiment/cpu-gpu` branch.
+- A CUDA model and a threaded C++ replica process separate batch shards concurrently; gradients are combined by supervised-token weight before one AdamW update.
+- Added thread-local backend selection and safe CUDA-context activation from worker threads.
+- Added `backend="hybrid"`, CPU batch/thread controls, training progress details, and numerical gradient tests; a complete hybrid training smoke test was also performed.
+- Benchmarks on the development RTX 3050 Laptop showed that hybrid execution is workload-dependent: some fixed long batches improved by about 10%, while repeated mixed-length m0fdii runs were about 6–11% slower than CUDA alone. The mode remains experimental and is not selected by `auto`.
+
+### Русский
+
+- В ветке `experiment/cpu-gpu` добавлено опциональное data-parallel обучение на CPU и GPU одновременно.
+- CUDA-модель и копия на многопоточном C++ обрабатывают разные части batch; градиенты объединяются по весу supervised-токенов перед одним шагом AdamW.
+- Добавлены потоко-локальный выбор backend и безопасная активация CUDA-контекста из рабочих потоков.
+- Добавлены `backend="hybrid"`, настройки CPU-части batch и числа потоков, вывод параметров в прогрессе и численные тесты градиентов; также выполнен полный smoke-test обучения.
+- Измерения на RTX 3050 Laptop показали зависимость от нагрузки: на некоторых фиксированных длинных batch получено около 10% ускорения, а повторяемые прогоны по batch m0fdii разной длины оказались примерно на 6–11% медленнее чистой CUDA. Режим остаётся экспериментальным и не включается через `auto`.
+
 ## 0.5.0 — 2026-07-14
 
 ### English
