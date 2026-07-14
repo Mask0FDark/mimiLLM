@@ -145,6 +145,14 @@ class DatasetTests(unittest.TestCase):
                 text_weight,
                 sum(len(sequence) - 1 for sequence in dataset.text_sequences),
             )
+            self.assertEqual(
+                dataset.validation_batch_count(2, 4, source="qa"),
+                len(list(dataset.validation_batches(2, 4, source="qa"))),
+            )
+            self.assertEqual(
+                dataset.validation_batch_count(2, 4, source="text"),
+                len(list(dataset.validation_batches(2, 4, source="text"))),
+            )
 
     def test_raw_text_batch_uses_language_model_windows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

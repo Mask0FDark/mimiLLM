@@ -408,10 +408,15 @@ def validation_loss(
         for source, weight in dataset.source_weights():
             source_loss = 0.0
             source_tokens = 0.0
-            batches = list(dataset.validation_batches(
+            batches = dataset.validation_batch_count(
                 config.batch_size, config.context_length, source=source,
-            ))
-            for batch_index, (inputs, targets, loss_weights) in enumerate(batches, 1):
+            )
+            for batch_index, (inputs, targets, loss_weights) in enumerate(
+                dataset.validation_batches(
+                    config.batch_size, config.context_length, source=source,
+                ),
+                1,
+            ):
                 supervised_tokens = sum(sum(row) for row in loss_weights)
                 logits = model(inputs)
                 batch_loss = logits.reshape(-1, config.vocab_size).cross_entropy(
@@ -420,7 +425,7 @@ def validation_loss(
                 source_loss += batch_loss * supervised_tokens
                 source_tokens += supervised_tokens
                 if progress_callback is not None:
-                    progress_callback(source, batch_index, len(batches))
+                    progress_callback(source, batch_index, batches)
             if source_tokens <= 0.0:
                 raise ValueError(f"validation source {source!r} has no supervised tokens")
             total += weight * source_loss / source_tokens

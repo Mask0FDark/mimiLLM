@@ -1,5 +1,19 @@
 # Changelog / История изменений
 
+## Unreleased — training acceleration experiment
+
+### English
+
+- Added a deterministic training-step benchmark for comparing backend and optimizer changes with the same synthetic batch.
+- Validation loss now streams validation batches instead of materializing the full batch list before evaluation. This keeps validation memory usage lower on larger datasets.
+- Added tests that verify validation batch counting and benchmark reproducibility.
+
+### Русский
+
+- Добавлен детерминированный benchmark одного шага обучения, чтобы сравнивать изменения backend и optimizer на одинаковом synthetic batch.
+- Validation loss теперь проходит validation batches потоково, без предварительного создания полного списка batches. На больших датасетах это снижает расход памяти во время validation.
+- Добавлены тесты для подсчёта validation batches и воспроизводимости benchmark.
+
 ## 0.6.0 — 2026-07-14
 
 ### English

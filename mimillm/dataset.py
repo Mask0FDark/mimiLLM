@@ -371,6 +371,29 @@ class TokenDataset:
         if pending:
             yield self._pad_loss_rows(pending)
 
+    def validation_batch_count(
+        self, batch_size: int, context_length: int, *, source: str,
+    ) -> int:
+        """Returns how many batches validation_batches will yield."""
+        if batch_size <= 0 or context_length <= 0:
+            raise ValueError("batch_size и context_length должны быть положительными")
+        if source not in {name for name, _ in self.source_weights()}:
+            raise ValueError(f"источник {source!r} отсутствует или имеет нулевой вес")
+        sequences = self.text_sequences if source == "text" else self.sequences
+        rows = 0
+        for sequence in sequences:
+            answer_start = 0 if source == "text" else self.qa_answer_starts[id(sequence)]
+            target_position = (
+                1 if source == "text" or self.qa_prompt_weight > 0.0
+                else answer_start
+            )
+            while target_position < len(sequence):
+                start = max(0, target_position - context_length // 2)
+                end = min(len(sequence), start + context_length + 1)
+                rows += 1
+                target_position = end
+        return math.ceil(rows / batch_size)
+
     def _pad_loss_rows(
         self, rows: list[tuple[list[int], list[int], list[float]]],
     ) -> tuple[list[list[int]], list[list[int]], list[list[float]]]:
