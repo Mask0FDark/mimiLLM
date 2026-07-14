@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 import random
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -271,6 +274,28 @@ def _resolve(base_dir: Path, configured_path: str) -> Path:
     return path.resolve() if path.is_absolute() else (base_dir / path).resolve()
 
 
+def _load_best_validation(path: Path) -> tuple[float, int]:
+    try:
+        values = json.loads(path.read_text(encoding="utf-8"))
+        loss = float(values["loss"])
+        step = int(values["step"])
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid best-validation metadata: {path}") from exc
+    if not math.isfinite(loss) or loss < 0.0 or step < 0:
+        raise ValueError(f"invalid best-validation values: {path}")
+    return loss, step
+
+
+def _save_best_validation(path: Path, loss: float, step: int) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump({"loss": loss, "step": step}, stream, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+
+
 def _datasets(
     config: TransformerConfig, base_dir: Path,
 ) -> tuple[TokenDataset, TokenDataset]:
@@ -321,19 +346,30 @@ def _batches_per_epoch(dataset: TokenDataset, config: TransformerConfig) -> int:
 
 def validation_loss(
     model: DecoderTransformer, dataset: TokenDataset, config: TransformerConfig,
+    *, progress_callback: Callable[[str, int, int], None] | None = None,
 ) -> float:
-    """Computes deterministic, source-weighted validation loss."""
+    """Computes loss over every supervised validation token."""
     total = 0.0
     with no_grad():
         for source, weight in dataset.source_weights():
-            inputs, targets, loss_weights = dataset.deterministic_batch_with_loss_weights(
-                config.batch_size, config.context_length, source=source
-            )
-            logits = model(inputs)
-            loss = logits.reshape(-1, config.vocab_size).cross_entropy(
-                flatten(targets), weights=flatten(loss_weights)  # type: ignore[arg-type]
-            ).item()
-            total += weight * loss
+            source_loss = 0.0
+            source_tokens = 0.0
+            batches = list(dataset.validation_batches(
+                config.batch_size, config.context_length, source=source,
+            ))
+            for batch_index, (inputs, targets, loss_weights) in enumerate(batches, 1):
+                supervised_tokens = sum(sum(row) for row in loss_weights)
+                logits = model(inputs)
+                batch_loss = logits.reshape(-1, config.vocab_size).cross_entropy(
+                    flatten(targets), weights=flatten(loss_weights)  # type: ignore[arg-type]
+                ).item()
+                source_loss += batch_loss * supervised_tokens
+                source_tokens += supervised_tokens
+                if progress_callback is not None:
+                    progress_callback(source, batch_index, len(batches))
+            if source_tokens <= 0.0:
+                raise ValueError(f"validation source {source!r} has no supervised tokens")
+            total += weight * source_loss / source_tokens
     return total
 
 
@@ -352,6 +388,8 @@ def train_model(
     destination = destination.resolve()
     destination.mkdir(parents=True, exist_ok=True)
     checkpoint_path = destination / "training_checkpoint.bin"
+    latest_weights_dir = destination / "last"
+    best_validation_path = destination / "best_validation.json"
 
     print("\nmimiLLM training", flush=True)
     print(f"Preparing datasets from {project_dir} ...", end=" ", flush=True)
@@ -377,6 +415,17 @@ def train_model(
             )
         rng = random.Random(loaded.seed + start_step)
         print(f"Resume: step {start_step} from {resume_path}", flush=True)
+
+    best_validation_loss = math.inf
+    best_validation_step = -1
+    if resume is not None and best_validation_path.is_file():
+        best_validation_loss, best_validation_step = _load_best_validation(
+            best_validation_path
+        )
+        print(
+            f"Best validation: {best_validation_loss:.5f} at step {best_validation_step}",
+            flush=True,
+        )
 
     backend = get_backend()
     backend_name = getattr(backend, "name", "python")
@@ -528,7 +577,31 @@ def train_model(
                     batch_seconds=elapsed,
                     validating=True,
                 )
-                latest_validation_loss = validation_loss(model, validation_data, config)
+                def report_validation(source: str, batch: int, batches: int) -> None:
+                    progress.stage(
+                        step,
+                        phase=f"val-{source} {batch}/{batches}",
+                        source=source,
+                        tokens=tokens,
+                        train_loss=loss_value,
+                        validation_loss=latest_validation_loss,
+                        learning_rate=optimizer.learning_rate,
+                        batch_seconds=time.perf_counter() - started,
+                    )
+
+                latest_validation_loss = validation_loss(
+                    model,
+                    validation_data,
+                    config,
+                    progress_callback=report_validation,
+                )
+                if latest_validation_loss < best_validation_loss:
+                    best_validation_loss = latest_validation_loss
+                    best_validation_step = step
+                    save_model(destination, model)
+                    _save_best_validation(
+                        best_validation_path, best_validation_loss, best_validation_step
+                    )
             progress.update(
                 step,
                 source=train_data.last_source,
@@ -552,7 +625,7 @@ def train_model(
                     seed=config.seed,
                 )
                 last_checkpoint_step = step
-                save_model(destination, model)
+                save_model(latest_weights_dir, model)
             if ends_epoch:
                 progress.finish_epoch(
                     batches=epoch_batches,
@@ -577,7 +650,9 @@ def train_model(
             seed=config.seed,
         )
         last_checkpoint_step = last_step
-        save_model(destination, model)
+        save_model(latest_weights_dir, model)
+        if best_validation_step < 0:
+            save_model(destination, model)
         print(f"Training interrupted at step {last_step}. Saved: {checkpoint_path}", flush=True)
 
     if not interrupted:
@@ -591,8 +666,17 @@ def train_model(
                 step=last_step,
                 seed=config.seed,
             )
-        save_model(destination, model)
+        save_model(latest_weights_dir, model)
+        if best_validation_step < 0:
+            save_model(destination, model)
         print(f"Training complete: {last_step}/{config.steps} steps", flush=True)
+        if best_validation_step >= 0:
+            print(
+                f"Best validation: {best_validation_loss:.5f} at step "
+                f"{best_validation_step} | weights={destination}",
+                flush=True,
+            )
+        print(f"Latest weights: {latest_weights_dir}", flush=True)
     return TrainingResult(model, destination, checkpoint_path, last_step, interrupted)
 
 

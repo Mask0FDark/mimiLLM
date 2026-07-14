@@ -88,6 +88,38 @@ class DatasetTests(unittest.TestCase):
                     if target == dataset.tokenizer.PAD:
                         self.assertEqual(weight, 0.0)
 
+    def test_validation_batches_cover_every_supervised_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            qa = root / "qa.txt"
+            text = root / "text.txt"
+            qa.write_text(
+                "Вопрос: A?\nОтвет: First answer.\n\n"
+                "Вопрос: B?\nОтвет: Second answer.\n",
+                encoding="utf-8",
+            )
+            text.write_text("A text document longer than one context.", encoding="utf-8")
+            dataset = TokenDataset(qa, text_paths=text, text_ratio=0.5)
+            qa_weight = sum(
+                sum(sum(row) for row in weights)
+                for _, _, weights in dataset.validation_batches(2, 4, source="qa")
+            )
+            text_weight = sum(
+                sum(sum(row) for row in weights)
+                for _, _, weights in dataset.validation_batches(2, 4, source="text")
+            )
+            self.assertEqual(
+                qa_weight,
+                sum(
+                    len(sequence) - dataset.qa_answer_starts[id(sequence)]
+                    for sequence in dataset.sequences
+                ),
+            )
+            self.assertEqual(
+                text_weight,
+                sum(len(sequence) - 1 for sequence in dataset.text_sequences),
+            )
+
     def test_raw_text_batch_uses_language_model_windows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

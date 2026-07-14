@@ -81,6 +81,8 @@ class TrainingSmokeTests(unittest.TestCase):
             restored = load_model(result.weights_dir)
             self.assertEqual(result.step, 1)
             self.assertTrue((result.weights_dir / "model.safetensors").is_file())
+            self.assertTrue((result.weights_dir / "last" / "model.safetensors").is_file())
+            self.assertTrue((result.weights_dir / "best_validation.json").is_file())
             self.assertTrue(result.checkpoint_path.is_file())
             self.assertEqual(restored.config, config)
 

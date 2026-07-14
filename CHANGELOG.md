@@ -1,5 +1,17 @@
 # Changelog / История изменений
 
+## 0.3.3 — 2026-07-14
+
+- Validation now covers every supervised QA and text token instead of a single batch.
+- Long validation runs report progress for every QA and text batch.
+- The model with the lowest validation loss is kept in the main weights directory; final-step weights are stored in `last/`.
+- Added persistent best-validation metadata so resumed training does not overwrite a better model.
+
+- Validation теперь проверяет все supervised-токены QA и текстов вместо одного batch.
+- Долгая validation показывает прогресс каждого QA- и text-batch.
+- В основной папке весов сохраняется модель с минимальным validation loss, а веса последнего шага находятся в `last/`.
+- Метаданные лучшей validation сохраняются между продолжениями обучения и защищают лучшую модель от перезаписи.
+
 ## 0.3.2 — 2026-07-13
 
 - Added one user-facing response API for questions, commands, and writing requests using the same model weights.

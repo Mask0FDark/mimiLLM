@@ -292,3 +292,51 @@ class TokenDataset:
         return self._batch_with_loss_weights(
             selected, selected_source, context_length, offset=offset,
         )
+
+    def validation_batches(
+        self, batch_size: int, context_length: int, *, source: str,
+    ) -> Iterable[tuple[list[list[int]], list[list[int]], list[list[float]]]]:
+        """Последовательно покрывает все supervised-токены validation-источника."""
+        if batch_size <= 0 or context_length <= 0:
+            raise ValueError("batch_size и context_length должны быть положительными")
+        if source not in {name for name, _ in self.source_weights()}:
+            raise ValueError(f"источник {source!r} отсутствует или имеет нулевой вес")
+        sequences = self.text_sequences if source == "text" else self.sequences
+        pending: list[tuple[list[int], list[int], list[float]]] = []
+        for sequence in sequences:
+            first_target = 1 if source == "text" else self.qa_answer_starts[id(sequence)]
+            target_position = first_target
+            while target_position < len(sequence):
+                # Оставляем до половины окна как историю и покрываем вторую
+                # половину новыми validation-целями. Если весь prompt помещается,
+                # первое QA-окно по-прежнему начинается с BOS.
+                start = max(0, target_position - context_length // 2)
+                end = min(len(sequence), start + context_length + 1)
+                window = sequence[start:end]
+                row_inputs = window[:-1]
+                row_targets = window[1:]
+                row_weights = [
+                    1.0 if position >= target_position else 0.0
+                    for position in range(start + 1, end)
+                ]
+                pending.append((row_inputs, row_targets, row_weights))
+                if len(pending) == batch_size:
+                    yield self._pad_loss_rows(pending)
+                    pending = []
+                target_position = end
+        if pending:
+            yield self._pad_loss_rows(pending)
+
+    def _pad_loss_rows(
+        self, rows: list[tuple[list[int], list[int], list[float]]],
+    ) -> tuple[list[list[int]], list[list[int]], list[list[float]]]:
+        width = max(len(inputs) for inputs, _, _ in rows)
+        batch_inputs: list[list[int]] = []
+        batch_targets: list[list[int]] = []
+        batch_weights: list[list[float]] = []
+        for inputs, targets, weights in rows:
+            padding = width - len(inputs)
+            batch_inputs.append([*inputs, *([self.tokenizer.PAD] * padding)])
+            batch_targets.append([*targets, *([self.tokenizer.PAD] * padding)])
+            batch_weights.append([*weights, *([0.0] * padding)])
+        return batch_inputs, batch_targets, batch_weights

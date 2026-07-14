@@ -197,10 +197,16 @@ print(result.weights_dir)
 weights/
 ├── config.json
 ├── model.safetensors
-└── training_checkpoint.bin
+├── best_validation.json
+├── training_checkpoint.bin
+└── last/
+    ├── config.json
+    └── model.safetensors
 ```
 
-`config.json` и `model.safetensors` — переносимая модель для `load_model()`. В `training_checkpoint.bin` дополнительно лежат moments AdamW, номер шага и seed; этот файл нужен только для возобновления обучения.
+Главные `config.json` и `model.safetensors` содержат веса с минимальным validation loss — именно их загружает `load_model("weights")`. В `last` сохраняются веса последнего шага, даже если к этому моменту модель начала переобучаться. `training_checkpoint.bin` дополнительно содержит moments AdamW, номер шага и seed и нужен для возобновления обучения.
+
+Validation проходит по всем проверочным ответам и текстам. Во время долгой проверки в терминале отдельно показывается прогресс `val-qa` и `val-text`.
 
 ```python
 result = train_from_config(
@@ -365,7 +371,7 @@ HERE = Path(__file__).resolve().parent
 result = train_from_config(HERE / "config.json", output_dir=HERE / "weights")
 ```
 
-Relative data paths are resolved from the config directory. Training exports `config.json` and `model.safetensors` for inference, plus `training_checkpoint.bin` for resuming AdamW state.
+Relative data paths are resolved from the config directory. The root `config.json` and `model.safetensors` keep the lowest-validation-loss model, `last/` keeps the final-step weights, and `training_checkpoint.bin` stores the AdamW state for resuming. Validation covers every supervised token and reports separate `val-qa` and `val-text` batch progress.
 
 See [examples/train_model.py](examples/train_model.py), [examples/use_weights.py](examples/use_weights.py), and the complete [m0fdii model project](https://github.com/Mask0FDark/m0fdii).
 
