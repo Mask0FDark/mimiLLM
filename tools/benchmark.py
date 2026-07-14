@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Измеряет реальные CPU-времена Python/C++ kernels и маленькой модели."""
+"""Measure real CPU timings for Python/C++ kernels and a small model."""
 
 from __future__ import annotations
 
@@ -32,9 +32,18 @@ def measure(function, repeats: int) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark mimiLLM")
-    parser.add_argument("--size", type=int, default=96)
-    parser.add_argument("--threads", type=int, default=max(1, os.cpu_count() or 1))
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument(
+        "--size", type=int, default=96,
+        help="side length of the square matrices (default: 96)",
+    )
+    parser.add_argument(
+        "--threads", type=int, default=max(1, os.cpu_count() or 1),
+        help="number of C++ worker threads (default: detected CPU count)",
+    )
+    parser.add_argument(
+        "--repeats", type=int, default=3,
+        help="number of timing runs; the best result is reported (default: 3)",
+    )
     args = parser.parse_args()
     rng = random.Random(42)
     left = [rng.uniform(-1, 1) for _ in range(args.size * args.size)]
@@ -55,7 +64,7 @@ def main() -> None:
         print(f"cpp_matmul threads=1 time={single:.6f}s speedup={python_time / single:.2f}x")
         print(f"cpp_matmul threads={cpp.num_threads} time={multi:.6f}s speedup={python_time / multi:.2f}x")
     else:
-        print("cpp_matmul: backend не собран")
+        print("cpp_matmul: backend is not built")
 
     config = TransformerConfig(
         context_length=8, d_model=8, n_layers=1, n_heads=2, d_mlp=16,

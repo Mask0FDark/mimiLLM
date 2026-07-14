@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Собирает переносимую shared library напрямую, без CMake."""
+"""Build the portable shared library directly, without CMake."""
 
 from __future__ import annotations
 
@@ -25,18 +25,18 @@ def library_name() -> str:
 
 
 def find_compiler() -> str:
-    """Находит C++ compiler, отдавая приоритет переменной CXX."""
+    """Find a C++ compiler, giving priority to the CXX environment variable."""
     requested = os.environ.get("CXX")
     if requested:
         path = shutil.which(requested) or (requested if Path(requested).exists() else None)
         if path:
             return str(path)
-        # Conda cxx-compiler на Windows может активировать cl.exe даже когда
-        # внешний Visual Studio Build Tools ещё не установлен. Тогда даём
-        # установленному в том же окружении MinGW реальный шанс на fallback.
+        # Conda's Windows cxx-compiler can select cl.exe even when Visual Studio
+        # Build Tools is missing. In that case, allow MinGW from the same
+        # environment to act as a fallback.
         if Path(requested).name.lower() not in {"cl", "cl.exe"}:
-            raise SystemExit(f"CXX указывает на недоступный компилятор: {requested}")
-        print(f"Предупреждение: {requested} из CXX не найден; ищу другой toolchain.")
+            raise SystemExit(f"CXX points to an unavailable compiler: {requested}")
+        print(f"Warning: {requested} from CXX was not found; trying another toolchain.")
     candidates = ["g++", "clang++", "c++"]
     if sys.platform == "win32":
         candidates = ["x86_64-w64-mingw32-g++.exe", "g++.exe", "clang++.exe", "cl.exe"]
@@ -45,17 +45,17 @@ def find_compiler() -> str:
         if path:
             return path
     raise SystemExit(
-        "C++ compiler не найден. Активируйте Conda-окружение mimillm "
-        "или задайте CXX=/путь/к/g++."
+        "No C++ compiler was found. Activate the mimillm Conda environment "
+        "or set CXX=/path/to/g++."
     )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Сборка C++ backend mimiLLM")
+    parser = argparse.ArgumentParser(description="Build the mimiLLM C++ backend")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--debug", action="store_true")
-    mode.add_argument("--release", action="store_true")
-    parser.add_argument("--clean", action="store_true")
+    mode.add_argument("--debug", action="store_true", help="build with debug symbols")
+    mode.add_argument("--release", action="store_true", help="build an optimized release library")
+    parser.add_argument("--clean", action="store_true", help="remove the build directory before building")
     parser.add_argument(
         "--output", type=Path,
         help="output shared-library path (defaults to build/<platform name>)",
@@ -64,7 +64,7 @@ def main() -> None:
     if args.clean:
         if BUILD.exists():
             shutil.rmtree(BUILD)
-        print("Каталог build удалён.")
+        print("Removed the build directory.")
         if not args.debug and not args.release:
             return
     compiler = find_compiler()
@@ -84,7 +84,7 @@ def main() -> None:
         command += ["/Od", "/Zi"] if args.debug else ["/O2", "/DNDEBUG"]
         command += [*sources, f"/Fe:{output}"]
         if os.environ.get("MIMILLM_NATIVE") == "1":
-            print("MIMILLM_NATIVE игнорируется для MSVC: переносимый baseline сохраняется.")
+            print("MIMILLM_NATIVE is ignored for MSVC to keep a portable baseline.")
     else:
         command = [
             compiler, "-std=c++20", "-shared", "-pthread", "-Wall", "-Wextra", "-Wpedantic",
@@ -93,7 +93,7 @@ def main() -> None:
         if sys.platform != "win32":
             command.insert(2, "-fPIC")
         else:
-            # DLL остаётся самодостаточной без поиска conda runtime DLL при ctypes-load.
+            # Keep the DLL self-contained so ctypes does not need Conda runtime DLLs.
             command[1:1] = ["-static-libgcc", "-static-libstdc++"]
         if args.debug:
             debug_flags = ["-O0", "-g", "-fno-omit-frame-pointer"]
@@ -101,19 +101,19 @@ def main() -> None:
                 debug_flags.insert(2, "-fsanitize=address,undefined")
             else:
                 print(
-                    "Предупреждение: Conda MinGW не поставляет ASan/UBSan runtime; "
-                    "Windows debug собирается с символами без санитайзеров."
+                    "Warning: Conda MinGW does not provide the ASan/UBSan runtime; "
+                    "the Windows debug build includes symbols without sanitizers."
                 )
             command[1:1] = debug_flags
         else:
             command[1:1] = ["-O3", "-DNDEBUG"]
         if os.environ.get("MIMILLM_NATIVE") == "1":
             command.insert(1, "-march=native")
-            print("ВНИМАНИЕ: -march=native делает библиотеку непереносимой между CPU.")
-    print(f"Платформа: {platform.system()} {platform.machine()}")
-    print("Команда:", subprocess.list2cmdline(command))
+            print("Warning: -march=native makes the library non-portable across CPUs.")
+    print(f"Platform: {platform.system()} {platform.machine()}")
+    print("Command:", subprocess.list2cmdline(command))
     subprocess.run(command, cwd=ROOT, check=True)
-    print(f"Собрано: {output}")
+    print(f"Built: {output}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Создаёт исходный ZIP-релиз без checkpoint, build и кэшей."""
+"""Create a source ZIP without checkpoints, build products, or caches."""
 
 from __future__ import annotations
 
@@ -16,8 +16,11 @@ EXCLUDED_NAMES = {"hm.txt"}
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Упаковка исходников mimiLLM")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist" / "mimiLLM-source.zip")
+    parser = argparse.ArgumentParser(description="Package the mimiLLM source tree")
+    parser.add_argument(
+        "--output", type=Path, default=ROOT / "dist" / "mimiLLM-source.zip",
+        help="destination ZIP path (default: dist/mimiLLM-source.zip)",
+    )
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(args.output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -30,7 +33,7 @@ def main() -> None:
                 and not any(part.endswith(".egg-info") for part in relative.parts)
             ):
                 archive.write(path, Path("mimiLLM") / relative)
-    print(f"Создан релиз: {args.output}")
+    print(f"Created release: {args.output}")
 
 
 if __name__ == "__main__":

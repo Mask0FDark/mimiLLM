@@ -1,5 +1,15 @@
 # Changelog / История изменений
 
+## 0.3.4 — 2026-07-14
+
+- Library examples and command-line tools now use clear English help text.
+- The weight-loading example explains deterministic generation, temperature, and top-k sampling.
+- Sampling now defaults to `top_k=20` in the example, while deterministic generation remains the default with `temperature=0`.
+
+- Примеры и консольные инструменты библиотеки теперь используют понятную английскую справку.
+- Пример загрузки весов объясняет детерминированную генерацию, temperature и top-k sampling.
+- В примере sampling использует `top_k=20`, а режим по умолчанию остаётся детерминированным благодаря `temperature=0`.
+
 ## 0.3.3 — 2026-07-14
 
 - Validation now covers every supervised QA and text token instead of a single batch.

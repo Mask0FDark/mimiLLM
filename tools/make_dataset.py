@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Создаёт воспроизводимые train/validation файлы из локального JSONL."""
+"""Create reproducible train and validation files from a local JSONL file."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_examples(path: Path) -> list[tuple[str, str]]:
-    """Читает и проверяет исходные пары, включая варианты вопросов."""
+    """Read and validate source pairs, including alternate questions."""
     examples: list[tuple[str, str]] = []
     with path.open("r", encoding="utf-8") as source:
         for line_number, line in enumerate(source, 1):
@@ -22,31 +22,31 @@ def load_examples(path: Path) -> list[tuple[str, str]]:
             try:
                 item = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ValueError(f"Некорректный JSON в строке {line_number}: {exc}") from exc
+                raise ValueError(f"Invalid JSON on line {line_number}: {exc}") from exc
             question, answer = item.get("question"), item.get("answer")
             variants = item.get("variants", [])
             if not isinstance(question, str) or not question.strip():
-                raise ValueError(f"Строка {line_number}: question должна быть непустой строкой")
+                raise ValueError(f"Line {line_number}: question must be a non-empty string")
             if not isinstance(answer, str) or not answer.strip():
-                raise ValueError(f"Строка {line_number}: answer должна быть непустой строкой")
+                raise ValueError(f"Line {line_number}: answer must be a non-empty string")
             if not isinstance(variants, list) or not all(isinstance(v, str) for v in variants):
-                raise ValueError(f"Строка {line_number}: variants должен быть массивом строк")
+                raise ValueError(f"Line {line_number}: variants must be an array of strings")
             for variant in [question, *variants]:
                 examples.append((variant.strip(), answer.strip()))
     if len(examples) < 2:
-        raise ValueError("Для разделения датасета нужно минимум два примера")
+        raise ValueError("At least two examples are required to split the dataset")
     return examples
 
 
 def render(examples: list[tuple[str, str]]) -> str:
-    """Представляет примеры простым читаемым текстовым форматом."""
+    """Render examples in the text format understood by mimiLLM."""
     return "\n\n".join(f"Вопрос: {q}\nОтвет: {a}" for q, a in examples) + "\n"
 
 
 def build_dataset(source: Path, train: Path, validation: Path, seed: int, ratio: float) -> tuple[int, int]:
-    """Перемешивает данные с фиксированным seed и атомарно записывает части."""
+    """Shuffle data with a fixed seed and write both splits."""
     if not 0.05 <= ratio <= 0.5:
-        raise ValueError("validation-ratio должен быть от 0.05 до 0.5")
+        raise ValueError("validation-ratio must be between 0.05 and 0.5")
     examples = load_examples(source)
     random.Random(seed).shuffle(examples)
     validation_count = max(1, round(len(examples) * ratio))
@@ -60,23 +60,31 @@ def build_dataset(source: Path, train: Path, validation: Path, seed: int, ratio:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Создание датасета mimiLLM")
-    parser.add_argument("--source", type=Path, default=ROOT / "data" / "qa_seed.jsonl")
+    parser = argparse.ArgumentParser(description="Build a mimiLLM question-answer dataset")
+    parser.add_argument(
+        "--source", type=Path, default=ROOT / "data" / "qa_seed.jsonl",
+        help="source JSONL file with question, answer, and optional variants fields",
+    )
     parser.add_argument(
         "--train", type=Path,
         default=ROOT / "data" / "question" / "train" / "questions.txt",
+        help="destination for the training split",
     )
     parser.add_argument(
         "--validation", type=Path,
         default=ROOT / "data" / "question" / "validation" / "questions.txt",
+        help="destination for the validation split",
     )
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--validation-ratio", type=float, default=0.15)
+    parser.add_argument("--seed", type=int, default=42, help="reproducible shuffle seed (default: 42)")
+    parser.add_argument(
+        "--validation-ratio", type=float, default=0.15,
+        help="fraction reserved for validation, from 0.05 to 0.5 (default: 0.15)",
+    )
     args = parser.parse_args()
     train_count, validation_count = build_dataset(
         args.source, args.train, args.validation, args.seed, args.validation_ratio
     )
-    print(f"Готово: train={train_count}, validation={validation_count}, seed={args.seed}")
+    print(f"Done: train={train_count}, validation={validation_count}, seed={args.seed}")
 
 
 if __name__ == "__main__":

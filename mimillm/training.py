@@ -712,10 +712,22 @@ def main(
     default_output_dir: str | Path = "weights",
 ) -> None:
     parser = argparse.ArgumentParser(description="Train a mimiLLM model")
-    parser.add_argument("--config", type=Path, default=Path(default_config))
-    parser.add_argument("--output-dir", type=Path, default=Path(default_output_dir))
-    parser.add_argument("--resume", type=Path)
-    parser.add_argument("--steps", type=int)
+    parser.add_argument(
+        "--config", type=Path, default=Path(default_config),
+        help=f"path to the training configuration (default: {default_config})",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path(default_output_dir),
+        help=f"directory for model weights and checkpoints (default: {default_output_dir})",
+    )
+    parser.add_argument(
+        "--resume", type=Path,
+        help="resume from a training checkpoint",
+    )
+    parser.add_argument(
+        "--steps", type=int,
+        help="override the total number of optimizer steps from the configuration",
+    )
     parser.add_argument(
         "--batches-per-epoch", type=int,
         help="number of optimizer batches grouped into one displayed epoch",

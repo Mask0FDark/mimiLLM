@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Показывает безопасные metadata и формы checkpoint."""
+"""Display safe checkpoint metadata and parameter shapes."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from mimillm.checkpoint import load_checkpoint
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Инспекция checkpoint mimiLLM")
-    parser.add_argument("checkpoint", type=Path)
+    parser = argparse.ArgumentParser(description="Inspect a mimiLLM training checkpoint")
+    parser.add_argument("checkpoint", type=Path, help="path to a training checkpoint")
     args = parser.parse_args()
     data = load_checkpoint(args.checkpoint)
     summary = {

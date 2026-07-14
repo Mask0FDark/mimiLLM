@@ -1,4 +1,4 @@
-"""Минимальный пример создания собственной конфигурации mimiLLM."""
+"""Minimal example of creating a custom mimiLLM configuration."""
 
 from mimillm import ByteTokenizer, ModelConfig, create_model
 
