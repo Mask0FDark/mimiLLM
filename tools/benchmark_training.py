@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import random
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -37,7 +38,7 @@ def synthetic_batch(
     return inputs, targets
 
 
-def training_step_snapshot(
+def _training_state(
     *,
     backend: str = "python",
     seed: int = 42,
@@ -47,9 +48,13 @@ def training_step_snapshot(
     n_heads: int = 2,
     d_mlp: int = 32,
     batch_size: int = 2,
-) -> dict[str, Any]:
+) -> tuple[
+    Any, TransformerConfig, DecoderTransformer, AdamW,
+    list[list[int]], list[list[int]],
+]:
     os.environ["MIMILLM_BACKEND"] = backend
     reset_backend()
+    selected_backend = get_backend()
     config = TransformerConfig(
         context_length=context_length,
         d_model=d_model,
@@ -68,6 +73,17 @@ def training_step_snapshot(
     model = DecoderTransformer(config)
     optimizer = AdamW(model.parameters(), config.learning_rate, weight_decay=0.0)
     inputs, targets = synthetic_batch(config, seed=seed + 1)
+    return selected_backend, config, model, optimizer, inputs, targets
+
+
+def _training_step(
+    selected_backend: Any,
+    config: TransformerConfig,
+    model: DecoderTransformer,
+    optimizer: AdamW,
+    inputs: list[list[int]],
+    targets: list[list[int]],
+) -> dict[str, Any]:
     started = time.perf_counter()
     logits = model(inputs)
     loss = logits.reshape(-1, config.vocab_size).cross_entropy(flatten(targets))
@@ -78,10 +94,9 @@ def training_step_snapshot(
     optimizer.zero_grad()
     elapsed = time.perf_counter() - started
     checksum = sum(sum(parameter.data) for parameter in model.parameters())
-    tokens = config.batch_size * config.context_length
-    selected_backend = get_backend()
+    tokens = sum(len(row) for row in inputs)
     return {
-        "backend": getattr(selected_backend, "name", backend),
+        "backend": getattr(selected_backend, "name", "unknown"),
         "tokens": tokens,
         "seconds": elapsed,
         "tokens_per_second": tokens / elapsed if elapsed > 0.0 else float("inf"),
@@ -92,6 +107,31 @@ def training_step_snapshot(
     }
 
 
+def training_step_snapshot(
+    *,
+    backend: str = "python",
+    seed: int = 42,
+    context_length: int = 16,
+    d_model: int = 16,
+    n_layers: int = 1,
+    n_heads: int = 2,
+    d_mlp: int = 32,
+    batch_size: int = 2,
+) -> dict[str, Any]:
+    """Run one timed step after backend initialization."""
+    state = _training_state(
+        backend=backend,
+        seed=seed,
+        context_length=context_length,
+        d_model=d_model,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        d_mlp=d_mlp,
+        batch_size=batch_size,
+    )
+    return _training_step(*state)
+
+
 def benchmark_training_step(
     *, repeats: int = 5, warmup: int = 1, **options: Any,
 ) -> dict[str, Any]:
@@ -99,16 +139,24 @@ def benchmark_training_step(
         raise ValueError("repeats must be positive")
     if warmup < 0:
         raise ValueError("warmup cannot be negative")
+    state = _training_state(**options)
     for _ in range(warmup):
-        training_step_snapshot(**options)
-    results = [training_step_snapshot(**options) for _ in range(repeats)]
+        _training_step(*state)
+    results = [_training_step(*state) for _ in range(repeats)]
     best = min(results, key=lambda item: item["seconds"])
+    seconds = [item["seconds"] for item in results]
+    mean_seconds = statistics.mean(seconds)
+    median_seconds = statistics.median(seconds)
     return {
         **best,
         "repeats": repeats,
         "warmup": warmup,
         "best_seconds": best["seconds"],
-        "mean_seconds": sum(item["seconds"] for item in results) / repeats,
+        "mean_seconds": mean_seconds,
+        "median_seconds": median_seconds,
+        "mean_tokens_per_second": best["tokens"] / mean_seconds,
+        "median_tokens_per_second": best["tokens"] / median_seconds,
+        "samples_seconds": seconds,
     }
 
 

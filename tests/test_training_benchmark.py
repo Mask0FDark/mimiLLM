@@ -32,6 +32,10 @@ class TrainingBenchmarkTests(unittest.TestCase):
         self.assertGreater(result["seconds"], 0.0)
         self.assertGreater(result["tokens_per_second"], 0.0)
         self.assertGreaterEqual(result["mean_seconds"], result["best_seconds"])
+        self.assertGreaterEqual(result["median_seconds"], result["best_seconds"])
+        self.assertGreater(result["mean_tokens_per_second"], 0.0)
+        self.assertGreater(result["median_tokens_per_second"], 0.0)
+        self.assertEqual(len(result["samples_seconds"]), 2)
 
 
 if __name__ == "__main__":

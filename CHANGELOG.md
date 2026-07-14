@@ -5,12 +5,14 @@
 ### English
 
 - Added a deterministic training-step benchmark for comparing backend and optimizer changes with the same synthetic batch.
+- The benchmark initializes its backend and model once, warms them up, and then measures consecutive training steps without including repeated CUDA compilation in the result.
 - Validation loss now streams validation batches instead of materializing the full batch list before evaluation. This keeps validation memory usage lower on larger datasets.
 - Added tests that verify validation batch counting and benchmark reproducibility.
 
 ### Русский
 
 - Добавлен детерминированный benchmark одного шага обучения, чтобы сравнивать изменения backend и optimizer на одинаковом synthetic batch.
+- Benchmark инициализирует backend и модель один раз, выполняет прогрев, а затем замеряет последовательные шаги обучения, не включая повторную компиляцию CUDA в результат.
 - Validation loss теперь проходит validation batches потоково, без предварительного создания полного списка batches. На больших датасетах это снижает расход памяти во время validation.
 - Добавлены тесты для подсчёта validation batches и воспроизводимости benchmark.
 
