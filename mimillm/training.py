@@ -16,10 +16,16 @@ from pathlib import Path
 from .api import save_model
 from .backend import get_backend, reset_backend
 from .checkpoint import load_checkpoint, save_checkpoint
-from .dataset import TokenDataset
+from .dataset import TokenDataset, load_qa_text, load_text_documents
 from .optim import AdamW
 from .tensor import no_grad
-from .tokenizer import create_tokenizer
+from .tokenizer import (
+    BpeTokenizer,
+    ByteTokenizer,
+    create_tokenizer,
+    save_tokenizer,
+    train_bpe_tokenizer,
+)
 from .transformer import DecoderTransformer, TransformerConfig
 from .utils import flatten, learning_rate_at
 
@@ -297,8 +303,52 @@ def _save_best_validation(path: Path, loss: float, step: int) -> None:
     temporary.replace(path)
 
 
+def _tokenizer_corpus(config: TransformerConfig, base_dir: Path) -> list[str]:
+    corpus: list[str] = []
+    if config.text_ratio > 0.0:
+        text_train = _resolve(base_dir, config.text_train_path)
+        corpus.extend(text for _, text in load_text_documents(text_train))
+    if config.text_ratio < 1.0:
+        question_train = _resolve(base_dir, config.question_train_path)
+        corpus.extend(
+            f"Вопрос: {question.strip()}\nОтвет: {answer.strip()}"
+            for question, answer in load_qa_text(question_train)
+        )
+    if not corpus:
+        raise ValueError("tokenizer training corpus is empty")
+    return corpus
+
+
+def train_tokenizer_from_config(
+    config_path: str | Path = "config.json",
+    *,
+    output_path: str | Path | None = None,
+    vocab_size: int | None = None,
+    min_frequency: int = 2,
+) -> BpeTokenizer:
+    """Trains a byte-level BPE tokenizer from configured train data."""
+    path = Path(config_path).resolve()
+    config = TransformerConfig.from_json(path)
+    base_dir = path.parent
+    target_vocab_size = vocab_size
+    if target_vocab_size is None:
+        target_vocab_size = (
+            config.vocab_size if config.tokenizer.strip().lower() == "bpe" else 4096
+        )
+    tokenizer = train_bpe_tokenizer(
+        _tokenizer_corpus(config, base_dir),
+        vocab_size=target_vocab_size,
+        min_frequency=min_frequency,
+    )
+    destination = Path(output_path) if output_path is not None else base_dir / "tokenizer.json"
+    if not destination.is_absolute():
+        destination = base_dir / destination
+    save_tokenizer(tokenizer, destination)
+    return tokenizer
+
+
 def _datasets(
-    config: TransformerConfig, base_dir: Path,
+    config: TransformerConfig, base_dir: Path, tokenizer: ByteTokenizer,
 ) -> tuple[TokenDataset, TokenDataset]:
     question_train = (
         _resolve(base_dir, config.question_train_path) if config.text_ratio < 1.0 else None
@@ -310,7 +360,6 @@ def _datasets(
     text_validation = (
         _resolve(base_dir, config.text_validation_path) if config.text_ratio > 0.0 else None
     )
-    tokenizer = create_tokenizer(config.tokenizer)
     dataset_options = {
         "tokenizer": tokenizer,
         "text_ratio": config.text_ratio,
@@ -396,12 +445,25 @@ def train_model(
     latest_weights_dir = destination / "last"
     best_validation_path = destination / "best_validation.json"
 
+    tokenizer_path = project_dir / "tokenizer.json"
+    tokenizer = create_tokenizer(
+        config.tokenizer,
+        path=tokenizer_path if config.tokenizer.strip().lower() == "bpe" else None,
+    )
+    if tokenizer.VOCAB_SIZE != config.vocab_size:
+        raise ValueError(
+            f"tokenizer vocabulary has {tokenizer.VOCAB_SIZE} tokens, "
+            f"but config vocab_size is {config.vocab_size}"
+        )
+    if isinstance(tokenizer, BpeTokenizer):
+        save_tokenizer(tokenizer, destination / "tokenizer.json")
+
     print("\nmimiLLM training", flush=True)
     print(f"Preparing datasets from {project_dir} ...", end=" ", flush=True)
-    train_data, validation_data = _datasets(config, project_dir)
+    train_data, validation_data = _datasets(config, project_dir, tokenizer)
     print("done", flush=True)
     print("Building model and optimizer ...", end=" ", flush=True)
-    model = DecoderTransformer(config)
+    model = DecoderTransformer(config, tokenizer_model=tokenizer)
     optimizer = AdamW(
         model.parameters(), config.learning_rate, weight_decay=config.weight_decay
     )

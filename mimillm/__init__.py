@@ -22,13 +22,28 @@ from .optim import AdamW, Optimizer, SGD
 from .parameter import Parameter
 from .safetensors import load_safetensors, save_safetensors
 from .tensor import Tensor, is_grad_enabled, no_grad
-from .tokenizer import ByteTokenizer, UnicodeByteTokenizer, create_tokenizer
-from .training import TrainingResult, train_from_config, train_model, validation_loss
+from .tokenizer import (
+    BpeTokenizer,
+    ByteTokenizer,
+    UnicodeByteTokenizer,
+    create_tokenizer,
+    load_tokenizer,
+    save_tokenizer,
+    train_bpe_tokenizer,
+)
+from .training import (
+    TrainingResult,
+    train_from_config,
+    train_model,
+    train_tokenizer_from_config,
+    validation_loss,
+)
 from .transformer import DecoderTransformer, TransformerBlock, TransformerConfig
 
 
 __all__ = [
     "AdamW",
+    "BpeTokenizer",
     "ByteTokenizer",
     "CheckpointData",
     "CudaBackend",
@@ -67,6 +82,7 @@ __all__ = [
     "load_model",
     "load_qa_text",
     "load_safetensors",
+    "load_tokenizer",
     "load_text_documents",
     "no_grad",
     "reset_backend",
@@ -74,9 +90,12 @@ __all__ = [
     "save_checkpoint",
     "save_model",
     "save_safetensors",
+    "save_tokenizer",
     "train_from_config",
+    "train_bpe_tokenizer",
     "train_model",
+    "train_tokenizer_from_config",
     "validation_loss",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

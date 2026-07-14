@@ -13,7 +13,7 @@ from .attention import MultiHeadCausalSelfAttention
 from .layers import Embedding, FeedForward, Linear, RMSNorm
 from .module import Module
 from .tensor import Tensor
-from .tokenizer import ByteTokenizer, UnicodeByteTokenizer, create_tokenizer
+from .tokenizer import BpeTokenizer, ByteTokenizer, UnicodeByteTokenizer, create_tokenizer
 
 
 @dataclass(frozen=True)
@@ -67,12 +67,16 @@ class TransformerConfig:
             "unicode_byte": UnicodeByteTokenizer.VOCAB_SIZE,
         }
         normalized_tokenizer = self.tokenizer.strip().lower()
-        if normalized_tokenizer not in tokenizer_sizes:
-            raise ValueError("tokenizer must be 'byte' or 'unicode'")
-        expected_vocab_size = tokenizer_sizes[normalized_tokenizer]
-        if self.vocab_size != expected_vocab_size:
+        if normalized_tokenizer not in {*tokenizer_sizes, "bpe"}:
+            raise ValueError("tokenizer must be 'byte', 'unicode', or 'bpe'")
+        expected_vocab_size = tokenizer_sizes.get(normalized_tokenizer)
+        if expected_vocab_size is not None and self.vocab_size != expected_vocab_size:
             raise ValueError(
                 f"vocab_size must be {expected_vocab_size} for tokenizer={self.tokenizer!r}"
+            )
+        if normalized_tokenizer == "bpe" and self.vocab_size < ByteTokenizer.VOCAB_SIZE:
+            raise ValueError(
+                f"vocab_size must be at least {ByteTokenizer.VOCAB_SIZE} for tokenizer='bpe'"
             )
         if self.d_model % self.n_heads:
             raise ValueError("d_model должен делиться на n_heads")
@@ -150,10 +154,42 @@ class TransformerBlock(Module):
 class DecoderTransformer(Module):
     """Decoder-only Transformer с обучаемыми позиционными embedding."""
 
-    def __init__(self, config: TransformerConfig) -> None:
+    def __init__(
+        self,
+        config: TransformerConfig,
+        *,
+        tokenizer_model: ByteTokenizer | None = None,
+    ) -> None:
         super().__init__()
         self.config = config
-        self.tokenizer = create_tokenizer(config.tokenizer)
+        normalized_tokenizer = config.tokenizer.strip().lower()
+        if tokenizer_model is None:
+            if normalized_tokenizer == "bpe":
+                raise ValueError(
+                    "BPE models require tokenizer_model or tokenizer.json through load_model"
+                )
+            tokenizer_model = create_tokenizer(config.tokenizer)
+        expected_type: type[ByteTokenizer]
+        if normalized_tokenizer == "byte":
+            expected_type = ByteTokenizer
+            valid_type = type(tokenizer_model) is ByteTokenizer
+        elif normalized_tokenizer in {"unicode", "unicode_byte"}:
+            expected_type = UnicodeByteTokenizer
+            valid_type = isinstance(tokenizer_model, UnicodeByteTokenizer)
+        else:
+            expected_type = BpeTokenizer
+            valid_type = isinstance(tokenizer_model, BpeTokenizer)
+        if not valid_type:
+            raise ValueError(
+                f"tokenizer_model must be {expected_type.__name__} for "
+                f"tokenizer={config.tokenizer!r}"
+            )
+        if tokenizer_model.VOCAB_SIZE != config.vocab_size:
+            raise ValueError(
+                f"tokenizer vocabulary has {tokenizer_model.VOCAB_SIZE} tokens, "
+                f"but config vocab_size is {config.vocab_size}"
+            )
+        self.tokenizer = tokenizer_model
         rng = random.Random(config.seed)
         self.token_embedding = Embedding(config.vocab_size, config.d_model, rng=rng)
         self.position_embedding = Embedding(config.context_length, config.d_model, rng=rng)

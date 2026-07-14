@@ -1,5 +1,21 @@
 # Changelog / История изменений
 
+## 0.6.0 — 2026-07-14
+
+### English
+
+- Added a trainable byte-level BPE tokenizer with UTF-8 byte fallback. It can learn subword tokens from project train data while still representing arbitrary text without unknown-token failures.
+- Added `tokenizer.json` artifacts for BPE models. `save_model` writes the tokenizer next to `model.safetensors`, and `load_model` restores it automatically from a model directory or adjacent `.safetensors` file.
+- Added `train_bpe_tokenizer`, `train_tokenizer_from_config`, `load_tokenizer`, and `save_tokenizer` to the public API.
+- Added BPE tokenizer, model save/load, and one-step training tests. Existing `byte` and `unicode` models remain compatible.
+
+### Русский
+
+- Добавлен обучаемый byte-level BPE токенизатор с UTF-8 byte fallback. Он учит subword-токены на train-данных проекта и при этом может представить любой текст без неизвестных токенов.
+- Для BPE-моделей добавлен artifact `tokenizer.json`. `save_model` сохраняет его рядом с `model.safetensors`, а `load_model` автоматически восстанавливает токенизатор из папки модели или рядом с `.safetensors`.
+- В публичный API добавлены `train_bpe_tokenizer`, `train_tokenizer_from_config`, `load_tokenizer` и `save_tokenizer`.
+- Добавлены тесты BPE-токенизации, сохранения/загрузки модели и короткого обучения. Старые модели с `byte` и `unicode` остаются совместимыми.
+
 ## 0.5.0 — 2026-07-14
 
 ### English
