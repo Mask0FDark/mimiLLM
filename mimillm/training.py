@@ -19,6 +19,7 @@ from .checkpoint import load_checkpoint, save_checkpoint
 from .dataset import TokenDataset
 from .optim import AdamW
 from .tensor import no_grad
+from .tokenizer import create_tokenizer
 from .transformer import DecoderTransformer, TransformerConfig
 from .utils import flatten, learning_rate_at
 
@@ -309,13 +310,17 @@ def _datasets(
     text_validation = (
         _resolve(base_dir, config.text_validation_path) if config.text_ratio > 0.0 else None
     )
+    tokenizer = create_tokenizer(config.tokenizer)
+    dataset_options = {
+        "tokenizer": tokenizer,
+        "text_ratio": config.text_ratio,
+        "qa_prompt_weight": config.qa_prompt_weight,
+        "qa_answer_prefix_weight": config.qa_answer_prefix_weight,
+        "qa_answer_prefix_tokens": config.qa_answer_prefix_tokens,
+    }
     return (
-        TokenDataset(question_train, text_paths=text_train, text_ratio=config.text_ratio),
-        TokenDataset(
-            question_validation,
-            text_paths=text_validation,
-            text_ratio=config.text_ratio,
-        ),
+        TokenDataset(question_train, text_paths=text_train, **dataset_options),
+        TokenDataset(question_validation, text_paths=text_validation, **dataset_options),
     )
 
 

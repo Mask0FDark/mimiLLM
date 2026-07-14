@@ -86,7 +86,7 @@ def generate_text(
     """Продолжает обычный UTF-8 текст и возвращает строку, а не token ids."""
     if not isinstance(prompt, str) or not prompt:
         raise ValueError("prompt должен быть непустой строкой")
-    codec = tokenizer or ByteTokenizer()
+    codec = tokenizer or getattr(model, "tokenizer", None) or ByteTokenizer()
     prompt_tokens = codec.encode(prompt, add_bos=True)
     generated = generate(model, prompt_tokens, **settings)  # type: ignore[arg-type]
     continuation = codec.decode(generated)
@@ -101,5 +101,5 @@ def generate_response(
     **settings: object,
 ) -> str:
     """Отвечает на пользовательский запрос через единый prompt модели."""
-    codec = tokenizer or ByteTokenizer()
+    codec = tokenizer or getattr(model, "tokenizer", None) or ByteTokenizer()
     return answer_question(model, codec, prompt, **settings)

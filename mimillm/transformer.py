@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -12,7 +13,7 @@ from .attention import MultiHeadCausalSelfAttention
 from .layers import Embedding, FeedForward, Linear, RMSNorm
 from .module import Module
 from .tensor import Tensor
-from .tokenizer import ByteTokenizer
+from .tokenizer import ByteTokenizer, UnicodeByteTokenizer, create_tokenizer
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class TransformerConfig:
     """Проверяемые размеры модели и параметры обучения."""
 
     vocab_size: int = ByteTokenizer.VOCAB_SIZE
+    tokenizer: str = "byte"
     context_length: int = 96
     d_model: int = 64
     n_layers: int = 2
@@ -35,6 +37,9 @@ class TransformerConfig:
     checkpoint_interval: int = 50
     seed: int = 42
     text_ratio: float = 0.5
+    qa_prompt_weight: float = 0.0
+    qa_answer_prefix_weight: float = 1.0
+    qa_answer_prefix_tokens: int = 0
     text_train_path: str = "data/text/train"
     text_validation_path: str = "data/text/validation"
     question_train_path: str = "data/question/train"
@@ -54,14 +59,47 @@ class TransformerConfig:
             or self.batches_per_epoch <= 0
         ):
             raise ValueError("batches_per_epoch должен быть положительным целым числом или null")
-        if self.vocab_size != ByteTokenizer.VOCAB_SIZE:
-            raise ValueError(f"vocab_size должен быть равен {ByteTokenizer.VOCAB_SIZE}")
+        if not isinstance(self.tokenizer, str):
+            raise TypeError("tokenizer must be a string")
+        tokenizer_sizes = {
+            "byte": ByteTokenizer.VOCAB_SIZE,
+            "unicode": UnicodeByteTokenizer.VOCAB_SIZE,
+            "unicode_byte": UnicodeByteTokenizer.VOCAB_SIZE,
+        }
+        normalized_tokenizer = self.tokenizer.strip().lower()
+        if normalized_tokenizer not in tokenizer_sizes:
+            raise ValueError("tokenizer must be 'byte' or 'unicode'")
+        expected_vocab_size = tokenizer_sizes[normalized_tokenizer]
+        if self.vocab_size != expected_vocab_size:
+            raise ValueError(
+                f"vocab_size must be {expected_vocab_size} for tokenizer={self.tokenizer!r}"
+            )
         if self.d_model % self.n_heads:
             raise ValueError("d_model должен делиться на n_heads")
         if self.learning_rate <= 0.0 or self.weight_decay < 0.0:
             raise ValueError("learning_rate > 0, weight_decay >= 0")
         if not 0.0 <= self.text_ratio <= 1.0:
             raise ValueError("text_ratio должен быть от 0 до 1")
+        if (
+            not isinstance(self.qa_prompt_weight, (int, float))
+            or isinstance(self.qa_prompt_weight, bool)
+            or not math.isfinite(self.qa_prompt_weight)
+            or not 0.0 <= self.qa_prompt_weight <= 1.0
+        ):
+            raise ValueError("qa_prompt_weight must be between 0 and 1")
+        if (
+            not isinstance(self.qa_answer_prefix_weight, (int, float))
+            or isinstance(self.qa_answer_prefix_weight, bool)
+            or not math.isfinite(self.qa_answer_prefix_weight)
+            or self.qa_answer_prefix_weight < 1.0
+        ):
+            raise ValueError("qa_answer_prefix_weight must be at least 1")
+        if (
+            not isinstance(self.qa_answer_prefix_tokens, int)
+            or isinstance(self.qa_answer_prefix_tokens, bool)
+            or self.qa_answer_prefix_tokens < 0
+        ):
+            raise ValueError("qa_answer_prefix_tokens must be a non-negative integer")
         if self.warmup_steps < 0 or self.validation_interval <= 0 or self.checkpoint_interval <= 0:
             raise ValueError("интервалы должны быть положительными, warmup_steps >= 0")
         data_paths = (
@@ -115,6 +153,7 @@ class DecoderTransformer(Module):
     def __init__(self, config: TransformerConfig) -> None:
         super().__init__()
         self.config = config
+        self.tokenizer = create_tokenizer(config.tokenizer)
         rng = random.Random(config.seed)
         self.token_embedding = Embedding(config.vocab_size, config.d_model, rng=rng)
         self.position_embedding = Embedding(config.context_length, config.d_model, rng=rng)

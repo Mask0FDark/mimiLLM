@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from collections.abc import Iterable
 from pathlib import Path
@@ -103,12 +104,38 @@ class TokenDataset:
         *,
         text_paths: Iterable[str | Path] | str | Path | None = None,
         text_ratio: float = 0.0,
+        qa_prompt_weight: float = 0.0,
+        qa_answer_prefix_weight: float = 1.0,
+        qa_answer_prefix_tokens: int = 0,
     ) -> None:
         if not 0.0 <= text_ratio <= 1.0:
             raise ValueError("text_ratio должен быть от 0 до 1")
+        if (
+            not isinstance(qa_prompt_weight, (int, float))
+            or isinstance(qa_prompt_weight, bool)
+            or not math.isfinite(qa_prompt_weight)
+            or not 0.0 <= qa_prompt_weight <= 1.0
+        ):
+            raise ValueError("qa_prompt_weight must be between 0 and 1")
+        if (
+            not isinstance(qa_answer_prefix_weight, (int, float))
+            or isinstance(qa_answer_prefix_weight, bool)
+            or not math.isfinite(qa_answer_prefix_weight)
+            or qa_answer_prefix_weight < 1.0
+        ):
+            raise ValueError("qa_answer_prefix_weight must be at least 1")
+        if (
+            not isinstance(qa_answer_prefix_tokens, int)
+            or isinstance(qa_answer_prefix_tokens, bool)
+            or qa_answer_prefix_tokens < 0
+        ):
+            raise ValueError("qa_answer_prefix_tokens must be a non-negative integer")
         self.path = Path(path) if path is not None else None
         self.tokenizer = tokenizer or ByteTokenizer()
         self.text_ratio = float(text_ratio)
+        self.qa_prompt_weight = float(qa_prompt_weight)
+        self.qa_answer_prefix_weight = float(qa_answer_prefix_weight)
+        self.qa_answer_prefix_tokens = qa_answer_prefix_tokens
         self.examples = load_qa_text(self.path) if self.path is not None else []
         self.sequences = [
             self.tokenizer.encode_qa(question, answer)
@@ -240,7 +267,7 @@ class TokenDataset:
             row_targets = window[1:]
             if source == "qa":
                 row_weights = [
-                    1.0 if absolute_position >= answer_start else 0.0
+                    self._qa_loss_weight(absolute_position, answer_start)
                     for absolute_position in range(start + 1, start + actual_size)
                 ]
             else:
@@ -254,6 +281,15 @@ class TokenDataset:
             targets.append(row_targets)
             loss_weights.append(row_weights)
         return inputs, targets, loss_weights
+
+    def _qa_loss_weight(self, target_position: int, answer_start: int) -> float:
+        """Returns the configured weight for one prompt or answer target."""
+        if target_position < answer_start:
+            return self.qa_prompt_weight
+        answer_offset = target_position - answer_start
+        if answer_offset < self.qa_answer_prefix_tokens:
+            return self.qa_answer_prefix_weight
+        return 1.0
 
     def deterministic_batch(
         self, batch_size: int, context_length: int, offset: int = 0, *,
@@ -304,7 +340,11 @@ class TokenDataset:
         sequences = self.text_sequences if source == "text" else self.sequences
         pending: list[tuple[list[int], list[int], list[float]]] = []
         for sequence in sequences:
-            first_target = 1 if source == "text" else self.qa_answer_starts[id(sequence)]
+            answer_start = 0 if source == "text" else self.qa_answer_starts[id(sequence)]
+            first_target = (
+                1 if source == "text" or self.qa_prompt_weight > 0.0
+                else answer_start
+            )
             target_position = first_target
             while target_position < len(sequence):
                 # Оставляем до половины окна как историю и покрываем вторую
@@ -316,7 +356,11 @@ class TokenDataset:
                 row_inputs = window[:-1]
                 row_targets = window[1:]
                 row_weights = [
-                    1.0 if position >= target_position else 0.0
+                    (
+                        1.0 if source == "text"
+                        else self._qa_loss_weight(position, answer_start)
+                    )
+                    if position >= target_position else 0.0
                     for position in range(start + 1, end)
                 ]
                 pending.append((row_inputs, row_targets, row_weights))

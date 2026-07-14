@@ -1,5 +1,6 @@
 {
-  "vocab_size": 260,
+  "vocab_size": 355,
+  "tokenizer": "unicode",
   "context_length": 96,
   "d_model": 64,
   "n_layers": 2,
@@ -14,6 +15,9 @@
   "checkpoint_interval": 50,
   "seed": 42,
   "text_ratio": 0.0,
+  "qa_prompt_weight": 0.1,
+  "qa_answer_prefix_weight": 3.0,
+  "qa_answer_prefix_tokens": 24,
   "text_train_path": "../data/text/train",
   "text_validation_path": "../data/text/validation",
   "question_train_path": "../data/question/train",

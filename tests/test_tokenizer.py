@@ -2,7 +2,7 @@
 
 import unittest
 
-from mimillm.tokenizer import ByteTokenizer
+from mimillm.tokenizer import ByteTokenizer, UnicodeByteTokenizer, create_tokenizer
 
 
 class ByteTokenizerTests(unittest.TestCase):
@@ -40,6 +40,30 @@ class ByteTokenizerTests(unittest.TestCase):
     def test_invalid_token_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "вне диапазона"):
             self.tokenizer.decode([260])
+
+
+class UnicodeByteTokenizerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tokenizer = UnicodeByteTokenizer()
+
+    def test_russian_uses_one_token_per_common_character(self) -> None:
+        text = "Привет, мир!"
+        encoded = self.tokenizer.encode(text)
+        self.assertEqual(self.tokenizer.decode(encoded), text)
+        self.assertLess(len(encoded), len(text.encode("utf-8")))
+
+    def test_unknown_unicode_falls_back_to_reversible_utf8(self) -> None:
+        text = "English 漢字 🚀"
+        self.assertEqual(self.tokenizer.decode(self.tokenizer.encode(text)), text)
+
+    def test_qa_format_and_factory(self) -> None:
+        tokenizer = create_tokenizer("unicode")
+        tokens = tokenizer.encode_qa("Кто ты?", "Я модель.")
+        self.assertIsInstance(tokenizer, UnicodeByteTokenizer)
+        self.assertEqual(
+            tokenizer.decode(tokens), "Вопрос: Кто ты?\nОтвет: Я модель.",
+        )
+        self.assertEqual(create_tokenizer("byte").VOCAB_SIZE, 260)
 
 
 if __name__ == "__main__":

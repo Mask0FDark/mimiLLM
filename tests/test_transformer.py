@@ -11,6 +11,7 @@ from mimillm.attention import MultiHeadCausalSelfAttention
 from mimillm.layers import Embedding, RMSNorm
 from mimillm.tensor import Tensor
 from mimillm.transformer import DecoderTransformer, TransformerBlock, TransformerConfig
+from mimillm.tokenizer import UnicodeByteTokenizer
 
 
 class TransformerTests(unittest.TestCase):
@@ -62,6 +63,19 @@ class TransformerTests(unittest.TestCase):
             TransformerConfig(vocab_size=100)
         with self.assertRaisesRegex(ValueError, "text_ratio"):
             TransformerConfig(text_ratio=1.1)
+
+    def test_unicode_tokenizer_changes_vocabulary_and_model_shape(self) -> None:
+        config = TransformerConfig(
+            tokenizer="unicode", vocab_size=UnicodeByteTokenizer.VOCAB_SIZE,
+            context_length=8, d_model=8, n_layers=1, n_heads=2, d_mlp=16,
+            batch_size=1, steps=2, validation_interval=1, checkpoint_interval=1,
+        )
+        model = DecoderTransformer(config)
+        tokens = model.tokenizer.encode("Привет")
+        self.assertEqual(
+            model([tokens]).shape,
+            (1, len(tokens), UnicodeByteTokenizer.VOCAB_SIZE),
+        )
 
     def test_all_example_configs_are_valid(self) -> None:
         root = Path(__file__).resolve().parents[1]

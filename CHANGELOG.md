@@ -1,5 +1,21 @@
 # Changelog / История изменений
 
+## 0.5.0 — 2026-07-14
+
+### English
+
+- Added the optional `unicode` tokenizer with a fixed 355-token vocabulary. Common Cyrillic characters use one token, while arbitrary text remains reversible through the UTF-8 byte fallback.
+- Models now store their tokenizer choice in `config.json`, and generation automatically uses the tokenizer attached to the loaded model. Existing 260-token `byte` models remain compatible.
+- Added `qa_prompt_weight`, `qa_answer_prefix_weight`, and `qa_answer_prefix_tokens` training controls. They can strengthen request representations and the first tokens that select a specific answer.
+- Updated the bilingual documentation and QA/mixed example configurations, and added tokenizer, model-shape, and weighted-dataset tests.
+
+### Русский
+
+- Добавлен опциональный токенизатор `unicode` с фиксированным словарём из 355 токенов. Частые кириллические символы занимают один токен, а произвольный текст остаётся обратимым благодаря UTF-8 fallback.
+- Выбор токенизатора теперь хранится в `config.json`, а генерация автоматически использует токенизатор загруженной модели. Старые `byte`-модели со словарём 260 токенов остаются совместимыми.
+- Добавлены настройки обучения `qa_prompt_weight`, `qa_answer_prefix_weight` и `qa_answer_prefix_tokens`. Они позволяют усилить представление запроса и первые токены, определяющие конкретный ответ.
+- Обновлены двуязычная документация и примеры QA/mixed; добавлены тесты токенизации, формы модели и весов QA-датасета.
+
 ## 0.4.0 — 2026-07-14
 
 ### English

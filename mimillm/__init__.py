@@ -22,7 +22,7 @@ from .optim import AdamW, Optimizer, SGD
 from .parameter import Parameter
 from .safetensors import load_safetensors, save_safetensors
 from .tensor import Tensor, is_grad_enabled, no_grad
-from .tokenizer import ByteTokenizer
+from .tokenizer import ByteTokenizer, UnicodeByteTokenizer, create_tokenizer
 from .training import TrainingResult, train_from_config, train_model, validation_loss
 from .transformer import DecoderTransformer, TransformerBlock, TransformerConfig
 
@@ -50,8 +50,10 @@ __all__ = [
     "TransformerBlock",
     "TransformerConfig",
     "TrainingResult",
+    "UnicodeByteTokenizer",
     "answer_question",
     "create_model",
+    "create_tokenizer",
     "cross_entropy",
     "cuda_is_available",
     "discover_question_files",
@@ -77,4 +79,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

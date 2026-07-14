@@ -88,6 +88,32 @@ class DatasetTests(unittest.TestCase):
                     if target == dataset.tokenizer.PAD:
                         self.assertEqual(weight, 0.0)
 
+    def test_qa_prefix_and_prompt_weights_are_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "data.txt"
+            path.write_text("Вопрос: A?\nОтвет: BCDEF\n", encoding="utf-8")
+            dataset = TokenDataset(
+                path,
+                qa_prompt_weight=0.25,
+                qa_answer_prefix_weight=3.0,
+                qa_answer_prefix_tokens=2,
+            )
+            _, _, weights = dataset.sample_batch_with_loss_weights(
+                1, 1000, random.Random(1)
+            )
+            answer_start = dataset.qa_answer_starts[id(dataset.sequences[0])]
+            row = weights[0]
+            self.assertTrue(all(weight == 0.25 for weight in row[:answer_start - 1]))
+            self.assertEqual(row[answer_start - 1:answer_start + 1], [3.0, 3.0])
+            self.assertTrue(all(weight == 1.0 for weight in row[answer_start + 1:]))
+            validation_weight = sum(
+                sum(sum(batch_row) for batch_row in batch_weights)
+                for _, _, batch_weights in dataset.validation_batches(
+                    1, 4, source="qa"
+                )
+            )
+            self.assertEqual(validation_weight, sum(row))
+
     def test_validation_batches_cover_every_supervised_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

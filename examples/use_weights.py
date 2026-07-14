@@ -12,7 +12,7 @@ parser.add_argument("weights", type=Path, help="directory containing config.json
 parser.add_argument("--prompt", default="What is a token?", help="question or instruction for the model")
 parser.add_argument(
     "--max-new-tokens", type=int, default=256,
-    help="maximum number of byte tokens to generate (default: 256)",
+    help="maximum number of tokens to generate (default: 256)",
 )
 parser.add_argument(
     "--temperature", type=float, default=0.0,
