@@ -744,7 +744,17 @@ class Tensor:
             if weight_sum <= 0.0:
                 raise ValueError("хотя бы один weight должен быть положительным")
         selected_backend = get_backend()
-        if checked_weights is None:
+        native_weighted = checked_weights is not None and hasattr(
+            selected_backend, "weighted_cross_entropy"
+        )
+        base_gradient: array | None = None
+        if native_weighted:
+            loss, native_gradient = selected_backend.weighted_cross_entropy(
+                self.data, checked, checked_weights, rows, classes,
+                compute_gradient=self.requires_grad,
+            )
+            base_gradient = native_gradient if self.requires_grad else None
+        elif checked_weights is None:
             loss = selected_backend.cross_entropy(self.data, checked, rows, classes)
         else:
             loss_sum = 0.0
@@ -761,10 +771,11 @@ class Tensor:
                     maximum + math.log(exponential_sum) - self.data[offset + target]
                 )
             loss = loss_sum / weight_sum
-        base_gradient = selected_backend.cross_entropy_backward(
-            self.data, checked, rows, classes
-        ) if self.requires_grad else None
-        if base_gradient is not None and checked_weights is not None:
+        if base_gradient is None and self.requires_grad:
+            base_gradient = selected_backend.cross_entropy_backward(
+                self.data, checked, rows, classes
+            )
+        if base_gradient is not None and checked_weights is not None and not native_weighted:
             for row, weight in enumerate(checked_weights):
                 scale = weight * rows / weight_sum
                 offset = row * classes

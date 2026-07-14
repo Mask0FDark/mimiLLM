@@ -29,17 +29,28 @@ class Optimizer:
         """Ограничивает общую L2-норму и возвращает исходное значение."""
         if max_norm <= 0.0:
             raise ValueError("max_norm должен быть положительным")
+        from .backend import get_backend
+
+        selected_backend = get_backend()
+        native_reduction = hasattr(selected_backend, "sum_squares")
         squared = 0.0
         for parameter in self.parameters:
             if parameter.grad is not None:
-                squared += sum(float(value) * value for value in parameter.grad)
+                squared += (
+                    selected_backend.sum_squares(parameter.grad)
+                    if native_reduction
+                    else sum(float(value) * value for value in parameter.grad)
+                )
         norm = math.sqrt(squared)
         if norm > max_norm:
             scale = max_norm / (norm + 1e-12)
             for parameter in self.parameters:
                 if parameter.grad is not None:
-                    for index in range(parameter.numel):
-                        parameter.grad[index] *= scale
+                    if hasattr(selected_backend, "scale_inplace"):
+                        selected_backend.scale_inplace(parameter.grad, scale)
+                    else:
+                        for index in range(parameter.numel):
+                            parameter.grad[index] *= scale
         return norm
 
     def step(self) -> None:

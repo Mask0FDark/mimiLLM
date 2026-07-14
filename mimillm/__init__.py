@@ -3,6 +3,7 @@
 from .api import LanguageModel, ModelConfig, create_model, load_model, save_model
 from .attention import MultiHeadCausalSelfAttention
 from .backend import get_backend, reset_backend
+from .backend_cuda import CudaBackend, is_available as cuda_is_available
 from .checkpoint import CheckpointData, load_checkpoint, save_checkpoint
 from .dataset import (
     TokenDataset,
@@ -30,6 +31,7 @@ __all__ = [
     "AdamW",
     "ByteTokenizer",
     "CheckpointData",
+    "CudaBackend",
     "DecoderTransformer",
     "Embedding",
     "FeedForward",
@@ -51,6 +53,7 @@ __all__ = [
     "answer_question",
     "create_model",
     "cross_entropy",
+    "cuda_is_available",
     "discover_question_files",
     "discover_text_files",
     "generate",
@@ -74,4 +77,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.3.4"
+__version__ = "0.4.0"

@@ -1,5 +1,23 @@
 # Changelog / История изменений
 
+## 0.4.0 — 2026-07-14
+
+### English
+
+- Added a complete NVIDIA CUDA backend for forward passes, autograd, attention, embeddings, softmax, masked cross-entropy, gradient clipping, and AdamW.
+- CUDA kernels are compiled at runtime with NVRTC and loaded through the NVIDIA Driver API, so Windows does not require Visual Studio, `cl.exe`, PyTorch, or TensorFlow.
+- `auto` now selects backends in the order CUDA, threaded C++, then Python; `MIMILLM_BACKEND` and the training API can force a specific backend.
+- CUDA device name and VRAM are shown in the training header.
+- Added matching CUDA numerical tests and CUDA benchmark output.
+
+### Русский
+
+- Добавлен полный NVIDIA CUDA backend для forward, autograd, attention, embedding, softmax, masked cross-entropy, gradient clipping и AdamW.
+- CUDA-ядра компилируются во время запуска через NVRTC и загружаются через NVIDIA Driver API, поэтому на Windows не нужны Visual Studio, `cl.exe`, PyTorch или TensorFlow.
+- Режим `auto` теперь выбирает backend в порядке CUDA, многопоточный C++, затем Python; конкретный backend можно задать через `MIMILLM_BACKEND` или API обучения.
+- В заголовке обучения показываются название видеокарты и объём VRAM.
+- Добавлены численные тесты CUDA и вывод CUDA в benchmark.
+
 ## 0.3.4 — 2026-07-14
 
 - Library examples and command-line tools now use clear English help text.

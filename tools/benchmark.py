@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from mimillm import backend_python
 from mimillm.backend_cpp import CppBackend, is_available
+from mimillm.backend_cuda import CudaBackend, is_available as cuda_is_available
 from mimillm.optim import AdamW
 from mimillm.transformer import DecoderTransformer, TransformerConfig
 
@@ -65,6 +66,16 @@ def main() -> None:
         print(f"cpp_matmul threads={cpp.num_threads} time={multi:.6f}s speedup={python_time / multi:.2f}x")
     else:
         print("cpp_matmul: backend is not built")
+    if cuda_is_available():
+        cuda = CudaBackend()
+        cuda_time = measure(
+            lambda: cuda.matmul(left, right, args.size, args.size, args.size),
+            args.repeats,
+        )
+        print(f"cuda_device={cuda.device_name} vram={cuda.device_memory / (1024 ** 3):.1f}GB")
+        print(f"cuda_matmul time={cuda_time:.6f}s speedup={python_time / cuda_time:.2f}x")
+    else:
+        print("cuda_matmul: NVIDIA driver or CUDA Toolkit with NVRTC is unavailable")
 
     config = TransformerConfig(
         context_length=8, d_model=8, n_layers=1, n_heads=2, d_mlp=16,

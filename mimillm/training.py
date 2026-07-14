@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .api import save_model
-from .backend import get_backend
+from .backend import get_backend, reset_backend
 from .checkpoint import load_checkpoint, save_checkpoint
 from .dataset import TokenDataset
 from .optim import AdamW
@@ -429,7 +429,13 @@ def train_model(
 
     backend = get_backend()
     backend_name = getattr(backend, "name", "python")
-    threads = getattr(backend, "num_threads", 1)
+    if backend_name == "cuda":
+        backend_details = (
+            f"device={getattr(backend, 'device_name', 'NVIDIA GPU')} | "
+            f"vram={getattr(backend, 'device_memory', 0) / (1024 ** 3):.1f}GB"
+        )
+    else:
+        backend_details = f"threads={getattr(backend, 'num_threads', 1)}"
     batches_per_epoch = _batches_per_epoch(train_data, config)
     total_epochs = math.ceil(config.steps / batches_per_epoch)
     print(
@@ -448,7 +454,7 @@ def train_model(
     print(
         f"Run: {start_step}->{config.steps} steps | epochs={total_epochs} | "
         f"batches/epoch={batches_per_epoch} | batch_size={config.batch_size} | "
-        f"backend={backend_name} | threads={threads} | output={destination}",
+        f"backend={backend_name} | {backend_details} | output={destination}",
         flush=True,
     )
     progress = _TrainingProgress(config.steps, start_step, batches_per_epoch)
@@ -687,6 +693,7 @@ def train_from_config(
     resume: str | Path | None = None,
     steps: int | None = None,
     batches_per_epoch: int | None = None,
+    backend: str | None = None,
 ) -> TrainingResult:
     """Loads JSON config; relative data paths are based on the config's directory."""
     path = Path(config_path).resolve()
@@ -699,6 +706,12 @@ def train_from_config(
         if batches_per_epoch <= 0:
             raise ValueError("batches_per_epoch must be positive")
         config = replace(config, batches_per_epoch=batches_per_epoch)
+    if backend is not None:
+        selected = backend.lower()
+        if selected not in {"auto", "cuda", "cpp", "python"}:
+            raise ValueError("backend must be auto, cuda, cpp, or python")
+        os.environ["MIMILLM_BACKEND"] = selected
+        reset_backend()
     return train_model(
         config,
         base_dir=path.parent,
@@ -732,6 +745,10 @@ def main(
         "--batches-per-epoch", type=int,
         help="number of optimizer batches grouped into one displayed epoch",
     )
+    parser.add_argument(
+        "--backend", choices=("auto", "cuda", "cpp", "python"),
+        help="compute backend; defaults to MIMILLM_BACKEND or auto",
+    )
     args = parser.parse_args()
     output_dir = (
         args.output_dir if args.output_dir.is_absolute()
@@ -746,6 +763,7 @@ def main(
         resume=resume,
         steps=args.steps,
         batches_per_epoch=args.batches_per_epoch,
+        backend=args.backend,
     )
     print(f"Weights: {result.weights_dir}")
     print(f"Training checkpoint: {result.checkpoint_path}")
