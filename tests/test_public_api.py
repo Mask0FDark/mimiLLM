@@ -30,13 +30,14 @@ class PublicApiTests(unittest.TestCase):
             mimillm.create_model(mimillm.ModelConfig(), d_model=8)
 
     def test_version_and_exports(self) -> None:
-        self.assertEqual(mimillm.__version__, "0.6.0")
+        self.assertEqual(mimillm.__version__, "0.7.0")
         for name in (
             "Tensor", "AdamW", "TokenDataset", "create_model", "load_model",
             "save_model", "train_from_config", "CudaBackend", "cuda_is_available",
             "UnicodeByteTokenizer", "BpeTokenizer", "create_tokenizer",
             "train_bpe_tokenizer", "train_tokenizer_from_config",
-            "load_tokenizer", "save_tokenizer",
+            "load_tokenizer", "save_tokenizer", "tokenize", "detokenize",
+            "pretokenize",
         ):
             self.assertIn(name, mimillm.__all__)
 

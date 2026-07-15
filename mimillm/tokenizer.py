@@ -5,13 +5,70 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 
-_BPE_CHUNKS = re.compile(r"\s+|[^\s]+")
+_LEGACY_BPE_CHUNKS = re.compile(r"\s+|[^\s]+")
+
+
+def _unicode_group(character: str) -> str:
+    """Classify a non-whitespace character for the Unicode BPE pre-tokenizer."""
+    category = unicodedata.category(character)
+    if character.isalpha() or category.startswith("M") or character == "_":
+        return "word"
+    if character.isdecimal():
+        return "number"
+    return "symbol"
+
+
+def _unicode_word_chunks(text: str) -> Iterable[str]:
+    """Yield lossless word-like chunks and attach horizontal space to the next chunk."""
+    pending_space = ""
+    index = 0
+    while index < len(text):
+        if text[index].isspace():
+            end = index + 1
+            while end < len(text) and text[end].isspace():
+                end += 1
+            whitespace = text[index:end]
+            if "\n" in whitespace or "\r" in whitespace:
+                if pending_space:
+                    yield pending_space
+                    pending_space = ""
+                yield whitespace
+            else:
+                pending_space += whitespace
+            index = end
+            continue
+
+        group = _unicode_group(text[index])
+        end = index + 1
+        while (
+            end < len(text)
+            and not text[end].isspace()
+            and _unicode_group(text[end]) == group
+        ):
+            end += 1
+        yield pending_space + text[index:end]
+        pending_space = ""
+        index = end
+    if pending_space:
+        yield pending_space
+
+
+def pretokenize(text: str, *, mode: str = "unicode_words_v1") -> list[str]:
+    """Split text into reversible chunks used independently by BPE merges."""
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    if mode == "legacy_whitespace":
+        return [match.group(0) for match in _LEGACY_BPE_CHUNKS.finditer(text)]
+    if mode == "unicode_words_v1":
+        return list(_unicode_word_chunks(text))
+    raise ValueError("BPE pretokenizer must be 'unicode_words_v1' or 'legacy_whitespace'")
 
 
 class ByteTokenizer:
@@ -154,9 +211,29 @@ class BpeTokenizer(ByteTokenizer):
     representable even when it was absent from the tokenizer corpus.
     """
 
-    FORMAT_VERSION = 1
+    FORMAT_VERSION = 2
+    LEGACY_FORMAT_VERSION = 1
+    DEFAULT_PRETOKENIZER = "unicode_words_v1"
+    LEGACY_PRETOKENIZER = "legacy_whitespace"
 
-    def __init__(self, merges: Iterable[tuple[int, int] | list[int]]) -> None:
+    def __init__(
+        self,
+        merges: Iterable[tuple[int, int] | list[int]],
+        *,
+        pretokenizer: str = DEFAULT_PRETOKENIZER,
+        format_version: int = FORMAT_VERSION,
+    ) -> None:
+        if format_version not in (self.LEGACY_FORMAT_VERSION, self.FORMAT_VERSION):
+            raise ValueError(f"unsupported BPE tokenizer version: {format_version!r}")
+        if pretokenizer not in (self.DEFAULT_PRETOKENIZER, self.LEGACY_PRETOKENIZER):
+            raise ValueError(
+                "BPE pretokenizer must be 'unicode_words_v1' or 'legacy_whitespace'"
+            )
+        if (
+            format_version == self.LEGACY_FORMAT_VERSION
+            and pretokenizer != self.LEGACY_PRETOKENIZER
+        ):
+            raise ValueError("BPE tokenizer version 1 requires legacy_whitespace")
         normalized: list[tuple[int, int]] = []
         pieces: dict[int, bytes] = {value: bytes([value]) for value in range(256)}
         seen: set[tuple[int, int]] = set()
@@ -182,6 +259,8 @@ class BpeTokenizer(ByteTokenizer):
             normalized.append(pair)
             pieces[token_id] = pieces[pair[0]] + pieces[pair[1]]
 
+        self.format_version = format_version
+        self.pretokenizer = pretokenizer
         self.merges = tuple(normalized)
         self.VOCAB_SIZE = ByteTokenizer.VOCAB_SIZE + len(self.merges)
         self._merge_tokens = {
@@ -233,8 +312,8 @@ class BpeTokenizer(ByteTokenizer):
         tokens: list[int] = []
         if add_bos:
             tokens.append(self.BOS)
-        for match in _BPE_CHUNKS.finditer(text):
-            tokens.extend(self._encode_piece(match.group(0).encode("utf-8")))
+        for chunk in pretokenize(text, mode=self.pretokenizer):
+            tokens.extend(self._encode_piece(chunk.encode("utf-8")))
         if add_eos:
             tokens.append(self.EOS)
         return tokens
@@ -262,9 +341,9 @@ class BpeTokenizer(ByteTokenizer):
 
     def to_dict(self) -> dict[str, Any]:
         """Returns the portable tokenizer.json representation."""
-        return {
+        values: dict[str, Any] = {
             "type": "bpe",
-            "version": self.FORMAT_VERSION,
+            "version": self.format_version,
             "vocab_size": self.VOCAB_SIZE,
             "byte_fallback": True,
             "special_tokens": {
@@ -275,6 +354,9 @@ class BpeTokenizer(ByteTokenizer):
             },
             "merges": [list(pair) for pair in self.merges],
         }
+        if self.format_version >= self.FORMAT_VERSION:
+            values["pretokenizer"] = self.pretokenizer
+        return values
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> "BpeTokenizer":
@@ -283,8 +365,17 @@ class BpeTokenizer(ByteTokenizer):
             raise ValueError("tokenizer JSON root must be an object")
         if values.get("type") != "bpe":
             raise ValueError("tokenizer type must be 'bpe'")
-        if values.get("version") != cls.FORMAT_VERSION:
-            raise ValueError(f"unsupported BPE tokenizer version: {values.get('version')!r}")
+        version = values.get("version")
+        if version == cls.LEGACY_FORMAT_VERSION:
+            pretokenizer_name = cls.LEGACY_PRETOKENIZER
+        elif version == cls.FORMAT_VERSION:
+            pretokenizer_name = values.get("pretokenizer")
+            if pretokenizer_name != cls.DEFAULT_PRETOKENIZER:
+                raise ValueError(
+                    f"unsupported BPE pretokenizer: {pretokenizer_name!r}"
+                )
+        else:
+            raise ValueError(f"unsupported BPE tokenizer version: {version!r}")
         if values.get("byte_fallback") is not True:
             raise ValueError("BPE tokenizer must enable byte_fallback")
         expected_special = {"pad": 256, "bos": 257, "eos": 258, "sep": 259}
@@ -293,7 +384,11 @@ class BpeTokenizer(ByteTokenizer):
         merges = values.get("merges")
         if not isinstance(merges, list):
             raise ValueError("BPE tokenizer merges must be a list")
-        tokenizer = cls(merges)
+        tokenizer = cls(
+            merges,
+            pretokenizer=pretokenizer_name,
+            format_version=version,
+        )
         if values.get("vocab_size") != tokenizer.VOCAB_SIZE:
             raise ValueError("BPE tokenizer vocab_size does not match its merges")
         return tokenizer
@@ -327,6 +422,7 @@ def train_bpe_tokenizer(
     *,
     vocab_size: int = 4096,
     min_frequency: int = 2,
+    pretokenizer: str = BpeTokenizer.DEFAULT_PRETOKENIZER,
 ) -> BpeTokenizer:
     """Learns deterministic byte-level BPE merges from training text only."""
     if (
@@ -346,8 +442,8 @@ def train_bpe_tokenizer(
     for text in documents:
         if not isinstance(text, str):
             raise TypeError("every tokenizer training document must be a string")
-        for match in _BPE_CHUNKS.finditer(text):
-            raw = tuple(match.group(0).encode("utf-8"))
+        for chunk in pretokenize(text, mode=pretokenizer):
+            raw = tuple(chunk.encode("utf-8"))
             if raw:
                 sequences[raw] += 1
     if not sequences:
@@ -369,7 +465,7 @@ def train_bpe_tokenizer(
         for sequence, frequency in sequences.items():
             replaced[BpeTokenizer._replace_pair(sequence, pair, token_id)] += frequency
         sequences = replaced
-    return BpeTokenizer(merges)
+    return BpeTokenizer(merges, pretokenizer=pretokenizer)
 
 
 def load_tokenizer(path: str | Path) -> BpeTokenizer:
@@ -400,3 +496,51 @@ def create_tokenizer(
             raise ValueError("tokenizer='bpe' requires tokenizer.json")
         return BpeTokenizer.load(path)
     raise ValueError("tokenizer must be 'byte', 'unicode', or 'bpe'")
+
+
+def _resolve_tokenizer(
+    tokenizer: ByteTokenizer | str | Path,
+    *,
+    path: str | Path | None,
+) -> ByteTokenizer:
+    if isinstance(tokenizer, ByteTokenizer):
+        if path is not None:
+            raise ValueError("path cannot be used with a tokenizer instance")
+        return tokenizer
+    if isinstance(tokenizer, Path):
+        if path is not None:
+            raise ValueError("provide the tokenizer path only once")
+        return load_tokenizer(tokenizer)
+    if not isinstance(tokenizer, str):
+        raise TypeError("tokenizer must be a name, path, or tokenizer instance")
+    normalized = tokenizer.strip().lower()
+    if normalized in {"byte", "unicode", "unicode_byte", "bpe"}:
+        return create_tokenizer(normalized, path=path)
+    if path is not None:
+        raise ValueError("path can only be combined with tokenizer='bpe'")
+    return load_tokenizer(tokenizer)
+
+
+def tokenize(
+    text: str,
+    tokenizer: ByteTokenizer | str | Path = "byte",
+    *,
+    path: str | Path | None = None,
+    add_bos: bool = False,
+    add_eos: bool = False,
+) -> list[int]:
+    """Encode text in one call using a tokenizer name, artifact path, or instance."""
+    selected = _resolve_tokenizer(tokenizer, path=path)
+    return selected.encode(text, add_bos=add_bos, add_eos=add_eos)
+
+
+def detokenize(
+    tokens: Iterable[int],
+    tokenizer: ByteTokenizer | str | Path = "byte",
+    *,
+    path: str | Path | None = None,
+    skip_special: bool = True,
+) -> str:
+    """Decode token ids in one call using a tokenizer name, artifact path, or instance."""
+    selected = _resolve_tokenizer(tokenizer, path=path)
+    return selected.decode(tokens, skip_special=skip_special)

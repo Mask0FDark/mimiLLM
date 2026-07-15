@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import random
 from collections.abc import Iterable
@@ -11,45 +12,108 @@ from .tokenizer import ByteTokenizer
 
 
 TEXT_SUFFIXES = {".txt", ".md", ".text"}
+QUESTION_SUFFIXES = {".txt", ".jsonl"}
 
 
 def discover_question_files(path: str | Path) -> list[Path]:
-    """Находит UTF-8 `.txt` файлы с вопросами в файле или каталоге."""
+    """Находит UTF-8 `.txt` QA и `.jsonl` dialogue файлы."""
     source = Path(path)
     if source.is_file():
-        if source.suffix.lower() != ".txt":
-            raise ValueError(f"файл вопросов должен иметь расширение .txt: {source}")
+        if source.suffix.lower() not in QUESTION_SUFFIXES:
+            raise ValueError(
+                f"файл вопросов должен иметь расширение .txt или .jsonl: {source}"
+            )
         return [source]
     if not source.is_dir():
         raise FileNotFoundError(f"путь набора вопросов не найден: {source}")
     files = sorted(
-        (item for item in source.rglob("*.txt") if item.is_file()),
+        (
+            item for item in source.rglob("*")
+            if item.is_file() and item.suffix.lower() in QUESTION_SUFFIXES
+        ),
         key=lambda item: item.as_posix().casefold(),
     )
     if not files:
-        raise ValueError(f"в каталоге вопросов нет файлов .txt: {source}")
+        raise ValueError(f"в каталоге вопросов нет файлов .txt или .jsonl: {source}")
     return files
 
 
+def _load_qa_blocks(file_path: Path) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    text = file_path.read_text(encoding="utf-8")
+    for block_number, block in enumerate(text.split("\n\n"), 1):
+        block = block.strip()
+        if not block:
+            continue
+        lines = block.splitlines()
+        if len(lines) < 2 or not lines[0].startswith("Вопрос: ") or not lines[1].startswith("Ответ: "):
+            raise ValueError(
+                f"{file_path}, блок {block_number}: ожидались строки Вопрос и Ответ"
+            )
+        question = lines[0][len("Вопрос: "):].strip()
+        answer = "\n".join([lines[1][len("Ответ: "):], *lines[2:]]).strip()
+        if not question or not answer:
+            raise ValueError(f"{file_path}, блок {block_number}: пустой вопрос или ответ")
+        result.append((question, answer))
+    return result
+
+
+def _dialogue_examples(file_path: Path) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    for line_number, line in enumerate(
+        file_path.read_text(encoding="utf-8").splitlines(), start=1,
+    ):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{file_path}, строка {line_number}: неверный JSON") from exc
+        if not isinstance(record, dict) or not isinstance(record.get("messages"), list):
+            raise ValueError(
+                f"{file_path}, строка {line_number}: ожидался объект с массивом messages"
+            )
+        messages = record["messages"]
+        if len(messages) < 2 or len(messages) % 2:
+            raise ValueError(
+                f"{file_path}, строка {line_number}: диалог должен содержать полные пары user/assistant"
+            )
+
+        turns: list[tuple[str, str]] = []
+        for index in range(0, len(messages), 2):
+            user = messages[index]
+            assistant = messages[index + 1]
+            if (
+                not isinstance(user, dict)
+                or user.get("role") != "user"
+                or not isinstance(user.get("content"), str)
+                or not user["content"].strip()
+                or not isinstance(assistant, dict)
+                or assistant.get("role") != "assistant"
+                or not isinstance(assistant.get("content"), str)
+                or not assistant["content"].strip()
+            ):
+                raise ValueError(
+                    f"{file_path}, строка {line_number}: роли должны чередоваться user/assistant, а content не должен быть пустым"
+                )
+            question = "".join(
+                f"{old_question}\nОтвет: {old_answer}\n\nВопрос: "
+                for old_question, old_answer in turns
+            ) + user["content"].strip()
+            answer = assistant["content"].strip()
+            result.append((question, answer))
+            turns.append((user["content"].strip(), answer))
+    return result
+
+
 def load_qa_text(path: str | Path) -> list[tuple[str, str]]:
-    """Читает блоки `Вопрос:`/`Ответ:` из UTF-8 файла или каталога."""
+    """Читает одиночные QA `.txt` и разворачивает dialogue `.jsonl` по ходам."""
     result: list[tuple[str, str]] = []
     for file_path in discover_question_files(path):
-        text = file_path.read_text(encoding="utf-8")
-        for block_number, block in enumerate(text.split("\n\n"), 1):
-            block = block.strip()
-            if not block:
-                continue
-            lines = block.splitlines()
-            if len(lines) < 2 or not lines[0].startswith("Вопрос: ") or not lines[1].startswith("Ответ: "):
-                raise ValueError(
-                    f"{file_path}, блок {block_number}: ожидались строки Вопрос и Ответ"
-                )
-            question = lines[0][len("Вопрос: "):].strip()
-            answer = "\n".join([lines[1][len("Ответ: "):], *lines[2:]]).strip()
-            if not question or not answer:
-                raise ValueError(f"{file_path}, блок {block_number}: пустой вопрос или ответ")
-            result.append((question, answer))
+        if file_path.suffix.lower() == ".jsonl":
+            result.extend(_dialogue_examples(file_path))
+        else:
+            result.extend(_load_qa_blocks(file_path))
     if not result:
         raise ValueError(f"датасет пуст: {path}")
     return result

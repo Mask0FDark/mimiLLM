@@ -123,6 +123,14 @@ my_model/
 
 Вопрос занимает первую строку блока. Ответ может продолжаться на следующих строках до пустой строки.
 
+Для настоящих многоходовых разговоров используйте `.jsonl`: каждая строка содержит один JSON-объект с чередующимися сообщениями `user` и `assistant`.
+
+```json
+{"messages":[{"role":"user","content":"Меня зовут Ира."},{"role":"assistant","content":"Приятно познакомиться, Ира."},{"role":"user","content":"Как меня зовут?"},{"role":"assistant","content":"Тебя зовут Ира."}]}
+```
+
+Библиотека разворачивает такой разговор по ходам. Первый ответ учится на первом вопросе, второй — на первом вопросе, первом ответе и новом вопросе, третий — на двух предыдущих парах и так далее. Loss вычисляется на текущем ответе, а предыдущие реплики остаются в attention-контексте. Благодаря этому формат обучения совпадает с обычным chat prompt; простой набор независимых QA-пар такого навыка не даёт.
+
 ### Конфигурация
 
 Небольшой рабочий `config.json`:
@@ -144,6 +152,7 @@ my_model/
   "warmup_steps": 20,
   "validation_interval": 25,
   "checkpoint_interval": 50,
+  "save_validation_checkpoints": false,
   "seed": 42,
   "text_ratio": 0.35,
   "qa_prompt_weight": 0.1,
@@ -172,6 +181,7 @@ my_model/
 - `learning_rate`, `weight_decay` и `warmup_steps` управляют AdamW;
 - `validation_interval` задаёт частоту проверки validation loss;
 - `checkpoint_interval` задаёт частоту сохранения состояния;
+- `save_validation_checkpoints: true` сохраняет отдельную папку весов для каждой проверки в `weights/validation/step_XXXXXXXX`; это позволяет позже сравнить ответы нескольких этапов обучения, а не только `best` и `last`;
 - `seed` делает инициализацию и выбор batch воспроизводимыми.
 
 `text_ratio` управляет смешиванием источников. При `0.0` модель учится только на вопросах и ответах, при `1.0` — только на обычных текстах. Значение `0.35` означает, что примерно 35% batch будут текстовыми.
@@ -180,6 +190,26 @@ my_model/
 
 Относительные пути к данным считаются от каталога, в котором лежит `config.json`. Поэтому запуск не зависит от текущей папки терминала.
 
+### Быстрый вызов токенизации
+
+Для одного преобразования необязательно вручную создавать объект токенизатора:
+
+```python
+from mimillm import detokenize, tokenize
+
+tokens = tokenize("Привет, mimiLLM!", "unicode", add_bos=True, add_eos=True)
+text = detokenize(tokens, "unicode")
+```
+
+BPE-токенизатор можно передать готовым объектом или прямо путём к артефакту:
+
+```python
+tokens = tokenize("Привет!", "weights/tokenizer.json")
+text = detokenize(tokens, "weights/tokenizer.json")
+```
+
+Для многократной работы эффективнее один раз вызвать `create_tokenizer` или `load_tokenizer`, а затем передавать готовый объект в `tokenize`.
+
 ### Subword BPE
 
 Для новых моделей можно использовать byte-level BPE:
@@ -187,7 +217,7 @@ my_model/
 ```json
 {
   "tokenizer": "bpe",
-  "vocab_size": 4096
+  "vocab_size": 512
 }
 ```
 
@@ -198,13 +228,15 @@ from mimillm import train_tokenizer_from_config
 
 tokenizer = train_tokenizer_from_config(
     "config.json",
-    vocab_size=4096,
+    vocab_size=512,
     min_frequency=2,
 )
 print(tokenizer.VOCAB_SIZE)
 ```
 
 Если корпус слишком маленький, фактический словарь может быть меньше запрошенного. В этом случае используйте напечатанное значение как `vocab_size` в `config.json`. После сохранения модели `save_model` кладёт `tokenizer.json` рядом с `model.safetensors`, а `load_model` загружает его автоматически.
+
+Новый BPE разделяет Unicode-слова, числа и знаки, а обычный пробел прикрепляет к следующему слову. Это позволяет учить токены вида `" модель"` и лучше использовать словарь. Формат записан в `tokenizer.json`; старые BPE-файлы версии 1 продолжают загружаться с прежним поведением.
 
 ### Скрипт обучения
 
@@ -436,7 +468,7 @@ data/question/train/
 data/question/validation/
 ```
 
-Text directories accept recursive UTF-8 `.txt`, `.md`, and `.text` documents. Question directories contain `.txt` files made of `Вопрос:` and `Ответ:` blocks. Set their paths and `text_ratio` in `config.json`, then call:
+Text directories accept recursive UTF-8 `.txt`, `.md`, and `.text` documents. Question directories accept `.txt` files made of `Вопрос:` and `Ответ:` blocks and dialogue `.jsonl` files. Each JSONL line contains one `{"messages": [...]}` object with strictly alternating `user` and `assistant` roles. Set the paths and `text_ratio` in `config.json`, then call:
 
 ```python
 from pathlib import Path
@@ -448,13 +480,26 @@ result = train_from_config(
 )
 ```
 
-Relative data paths are resolved from the config directory. The root `config.json` and `model.safetensors` keep the lowest-validation-loss model, `last/` keeps the final-step weights, and `training_checkpoint.bin` stores the AdamW state for resuming. Validation covers every supervised token and reports separate `val-qa` and `val-text` batch progress.
+Relative data paths are resolved from the config directory. The root `config.json` and `model.safetensors` keep the lowest-validation-loss model, `last/` keeps the final-step weights, and `training_checkpoint.bin` stores the AdamW state for resuming. Validation covers every supervised token and reports separate `val-qa` and `val-text` batch progress. Set `save_validation_checkpoints` to `true` to retain every evaluated model in `weights/validation/step_XXXXXXXX`, which is useful when generation quality and validation loss do not peak at the same step.
+
+Dialogue JSONL is expanded turn by turn. When the second assistant message is trained, the first user/assistant pair is already in its attention context; later targets receive all preceding complete turns that fit the configured context. The loss targets the current assistant answer. This is the appropriate format for teaching a model to use chat history—unrelated single-turn QA records cannot provide that supervision.
 
 See [examples/train_model.py](examples/train_model.py), [examples/use_weights.py](examples/use_weights.py), and the complete [m0fdii model project](https://github.com/Mask0FDark/m0fdii).
 
 ### Tokenization and QA loss
 
 `tokenizer: "byte"` uses a 260-token vocabulary and can represent any UTF-8 text. `tokenizer: "unicode"` uses a 355-token vocabulary: common Cyrillic characters have one token, while every other character still has a reversible UTF-8 byte fallback. `tokenizer: "bpe"` trains a byte-level subword vocabulary from your train data and stores it in `tokenizer.json`. The selected tokenizer is stored in `config.json` and is used automatically after `load_model`.
+
+For one-off conversions, use the convenience API with a tokenizer name, a BPE artifact path, or an already loaded tokenizer object:
+
+```python
+from mimillm import detokenize, tokenize
+
+tokens = tokenize("Hello, mimiLLM!", "unicode", add_bos=True, add_eos=True)
+text = detokenize(tokens, "unicode")
+
+bpe_tokens = tokenize("Hello!", "weights/tokenizer.json")
+```
 
 For a Unicode model, set both fields together:
 
@@ -473,11 +518,13 @@ For a BPE model, train the tokenizer before training weights:
 ```python
 from mimillm import train_tokenizer_from_config
 
-tokenizer = train_tokenizer_from_config("config.json", vocab_size=4096)
+tokenizer = train_tokenizer_from_config("config.json", vocab_size=512)
 print(tokenizer.VOCAB_SIZE)
 ```
 
 Use the printed value as `vocab_size` if the training corpus is too small to fill the requested vocabulary. A saved BPE model directory contains `config.json`, `model.safetensors`, and `tokenizer.json`.
+
+New BPE artifacts use a Unicode-aware pre-tokenizer that separates words, numbers, and symbols while attaching horizontal whitespace to the following piece. This allows useful leading-space tokens such as `" model"`. The selected behavior is stored in `tokenizer.json`; version 1 BPE artifacts remain loadable with their original segmentation.
 
 The QA prompt always remains visible to attention. `qa_prompt_weight` optionally includes it in the language-model loss, while the two answer-prefix settings give the first answer tokens more influence. Defaults preserve the original answer-only objective. Changing the tokenizer or vocabulary size requires training new weights because the embedding and output shapes change.
 

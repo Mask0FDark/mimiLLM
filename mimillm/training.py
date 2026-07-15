@@ -303,6 +303,26 @@ def _save_best_validation(path: Path, loss: float, step: int) -> None:
     temporary.replace(path)
 
 
+def _save_validation_snapshot(
+    destination: Path,
+    model: DecoderTransformer,
+    *,
+    loss: float,
+    step: int,
+) -> Path:
+    snapshot = destination / "validation" / f"step_{step:08d}"
+    save_model(snapshot, model)
+    metadata = snapshot / "validation.json"
+    temporary = metadata.with_suffix(metadata.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump({"loss": loss, "step": step}, stream, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(metadata)
+    return snapshot
+
+
 def _tokenizer_corpus(config: TransformerConfig, base_dir: Path) -> list[str]:
     corpus: list[str] = []
     if config.text_ratio > 0.0:
@@ -325,6 +345,7 @@ def train_tokenizer_from_config(
     output_path: str | Path | None = None,
     vocab_size: int | None = None,
     min_frequency: int = 2,
+    pretokenizer: str = BpeTokenizer.DEFAULT_PRETOKENIZER,
 ) -> BpeTokenizer:
     """Trains a byte-level BPE tokenizer from configured train data."""
     path = Path(config_path).resolve()
@@ -339,6 +360,7 @@ def train_tokenizer_from_config(
         _tokenizer_corpus(config, base_dir),
         vocab_size=target_vocab_size,
         min_frequency=min_frequency,
+        pretokenizer=pretokenizer,
     )
     destination = Path(output_path) if output_path is not None else base_dir / "tokenizer.json"
     if not destination.is_absolute():
@@ -673,6 +695,13 @@ def train_model(
                     config,
                     progress_callback=report_validation,
                 )
+                if config.save_validation_checkpoints:
+                    _save_validation_snapshot(
+                        destination,
+                        model,
+                        loss=latest_validation_loss,
+                        step=step,
+                    )
                 if latest_validation_loss < best_validation_loss:
                     best_validation_loss = latest_validation_loss
                     best_validation_step = step

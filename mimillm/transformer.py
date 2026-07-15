@@ -35,6 +35,7 @@ class TransformerConfig:
     warmup_steps: int = 10
     validation_interval: int = 20
     checkpoint_interval: int = 50
+    save_validation_checkpoints: bool = False
     seed: int = 42
     text_ratio: float = 0.5
     qa_prompt_weight: float = 0.0
@@ -106,6 +107,8 @@ class TransformerConfig:
             raise ValueError("qa_answer_prefix_tokens must be a non-negative integer")
         if self.warmup_steps < 0 or self.validation_interval <= 0 or self.checkpoint_interval <= 0:
             raise ValueError("интервалы должны быть положительными, warmup_steps >= 0")
+        if not isinstance(self.save_validation_checkpoints, bool):
+            raise TypeError("save_validation_checkpoints must be a boolean")
         data_paths = (
             "text_train_path", "text_validation_path",
             "question_train_path", "question_validation_path",

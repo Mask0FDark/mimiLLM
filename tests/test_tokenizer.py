@@ -9,8 +9,11 @@ from mimillm.tokenizer import (
     ByteTokenizer,
     UnicodeByteTokenizer,
     create_tokenizer,
+    detokenize,
     load_tokenizer,
+    pretokenize,
     save_tokenizer,
+    tokenize,
     train_bpe_tokenizer,
 )
 
@@ -77,6 +80,12 @@ class UnicodeByteTokenizerTests(unittest.TestCase):
 
 
 class BpeTokenizerTests(unittest.TestCase):
+    def test_unicode_pretokenizer_is_lossless_and_attaches_spaces(self) -> None:
+        text = "Hello, мир! 42\nNext"
+        chunks = pretokenize(text)
+        self.assertEqual("".join(chunks), text)
+        self.assertEqual(chunks, ["Hello", ",", " мир", "!", " 42", "\n", "Next"])
+
     def test_trained_bpe_is_reversible_and_shorter_than_bytes(self) -> None:
         text = "Привет, модель. Привет, модель. Hello model."
         tokenizer = train_bpe_tokenizer([text], vocab_size=300, min_frequency=1)
@@ -86,6 +95,16 @@ class BpeTokenizerTests(unittest.TestCase):
         self.assertLess(len(encoded), len(ByteTokenizer().encode(text)))
         self.assertLessEqual(tokenizer.VOCAB_SIZE, 300)
         self.assertGreater(tokenizer.VOCAB_SIZE, ByteTokenizer.VOCAB_SIZE)
+        self.assertEqual(tokenizer.format_version, 2)
+        self.assertEqual(tokenizer.pretokenizer, "unicode_words_v1")
+
+    def test_bpe_learns_leading_space_pieces(self) -> None:
+        tokenizer = train_bpe_tokenizer(
+            ["alpha beta alpha beta alpha beta"], vocab_size=290, min_frequency=1,
+        )
+        self.assertLess(
+            len(tokenizer.encode(" beta")), len(ByteTokenizer().encode(" beta")),
+        )
 
     def test_bpe_save_load_and_factory(self) -> None:
         tokenizer = train_bpe_tokenizer(
@@ -102,6 +121,20 @@ class BpeTokenizerTests(unittest.TestCase):
         self.assertEqual(restored.VOCAB_SIZE, tokenizer.VOCAB_SIZE)
         self.assertEqual(restored.to_dict(), tokenizer.to_dict())
 
+    def test_version_one_tokenizer_remains_compatible(self) -> None:
+        legacy = BpeTokenizer(
+            [(104, 101), (260, 108)],
+            pretokenizer="legacy_whitespace",
+            format_version=1,
+        )
+        values = legacy.to_dict()
+        self.assertEqual(values["version"], 1)
+        self.assertNotIn("pretokenizer", values)
+        restored = BpeTokenizer.from_dict(values)
+        text = "hello hello"
+        self.assertEqual(restored.encode(text), legacy.encode(text))
+        self.assertEqual(restored.decode(restored.encode(text)), text)
+
     def test_bpe_requires_tokenizer_json(self) -> None:
         with self.assertRaisesRegex(ValueError, "tokenizer.json"):
             create_tokenizer("bpe")
@@ -111,6 +144,25 @@ class BpeTokenizerTests(unittest.TestCase):
             BpeTokenizer([(ByteTokenizer.BOS, 1)])
         with self.assertRaisesRegex(ValueError, "unavailable"):
             BpeTokenizer([(999, 1)])
+
+
+class ConvenienceTokenizerTests(unittest.TestCase):
+    def test_named_tokenizer_round_trip(self) -> None:
+        text = "Привет, mimiLLM!"
+        tokens = tokenize(text, "unicode", add_bos=True, add_eos=True)
+        self.assertEqual(tokens[0], ByteTokenizer.BOS)
+        self.assertEqual(tokens[-1], ByteTokenizer.EOS)
+        self.assertEqual(detokenize(tokens, "unicode"), text)
+
+    def test_bpe_artifact_path_round_trip(self) -> None:
+        tokenizer = train_bpe_tokenizer(
+            ["tokenization tokenization"], vocab_size=280, min_frequency=1,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = save_tokenizer(tokenizer, Path(directory) / "tokenizer.json")
+            tokens = tokenize("tokenization", path)
+            restored = detokenize(tokens, path)
+        self.assertEqual(restored, "tokenization")
 
 
 if __name__ == "__main__":

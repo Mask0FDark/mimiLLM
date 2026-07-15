@@ -77,7 +77,7 @@ class TrainingSmokeTests(unittest.TestCase):
                 context_length=4, d_model=4, n_layers=1, n_heads=1, d_mlp=8,
                 batch_size=1, steps=1, learning_rate=0.01, weight_decay=0.0,
                 warmup_steps=0, validation_interval=1, checkpoint_interval=1,
-                text_ratio=0.5,
+                save_validation_checkpoints=True, text_ratio=0.5,
             )
             config_path = root / "config.json"
             config_path.write_text(
@@ -89,6 +89,9 @@ class TrainingSmokeTests(unittest.TestCase):
             self.assertTrue((result.weights_dir / "model.safetensors").is_file())
             self.assertTrue((result.weights_dir / "last" / "model.safetensors").is_file())
             self.assertTrue((result.weights_dir / "best_validation.json").is_file())
+            validation_snapshot = result.weights_dir / "validation" / "step_00000001"
+            self.assertTrue((validation_snapshot / "model.safetensors").is_file())
+            self.assertTrue((validation_snapshot / "validation.json").is_file())
             self.assertTrue(result.checkpoint_path.is_file())
             self.assertEqual(restored.config, config)
 

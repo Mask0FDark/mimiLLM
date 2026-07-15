@@ -58,6 +58,55 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(len(load_qa_text(root)), 2)
             self.assertEqual(len(TokenDataset(root).examples), 2)
 
+    def test_dialogue_jsonl_expands_each_assistant_turn_with_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dialogues.jsonl"
+            record = {
+                "messages": [
+                    {"role": "user", "content": "Меня зовут Ира."},
+                    {"role": "assistant", "content": "Приятно познакомиться, Ира."},
+                    {"role": "user", "content": "Как меня зовут?"},
+                    {"role": "assistant", "content": "Тебя зовут Ира."},
+                    {"role": "user", "content": "А что я сообщила сначала?"},
+                    {"role": "assistant", "content": "Сначала ты сообщила своё имя."},
+                ]
+            }
+            path.write_text(
+                json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8",
+            )
+            examples = load_qa_text(path)
+            self.assertEqual(len(examples), 3)
+            self.assertEqual(examples[0], ("Меня зовут Ира.", "Приятно познакомиться, Ира."))
+            self.assertEqual(
+                examples[1],
+                (
+                    "Меня зовут Ира.\nОтвет: Приятно познакомиться, Ира."
+                    "\n\nВопрос: Как меня зовут?",
+                    "Тебя зовут Ира.",
+                ),
+            )
+            self.assertIn("Вопрос: А что я сообщила сначала?", examples[2][0])
+            dataset = TokenDataset(path)
+            decoded = dataset.tokenizer.decode(dataset.sequences[2])
+            self.assertIn("Ответ: Тебя зовут Ира.", decoded)
+            self.assertTrue(decoded.endswith("Ответ: Сначала ты сообщила своё имя."))
+
+    def test_dialogue_jsonl_rejects_broken_role_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dialogues.jsonl"
+            path.write_text(
+                json.dumps(
+                    {"messages": [
+                        {"role": "assistant", "content": "Неверный первый ход."},
+                        {"role": "user", "content": "Неверный второй ход."},
+                    ]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "user/assistant"):
+                load_qa_text(path)
+
     def test_short_example_uses_dynamic_context_without_padding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "data.txt"

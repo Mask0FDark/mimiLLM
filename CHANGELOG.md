@@ -1,19 +1,27 @@
 # Changelog / История изменений
 
-## Unreleased — training acceleration experiment
+## 0.7.0 — 2026-07-15
 
 ### English
 
 - Added a deterministic training-step benchmark for comparing backend and optimizer changes with the same synthetic batch.
+- Added one-call `tokenize`, `detokenize`, and `pretokenize` APIs that accept tokenizer names, BPE artifact paths, or tokenizer objects.
+- New BPE artifacts use versioned Unicode-aware word, number, symbol, and leading-space segmentation. Existing version 1 artifacts retain their original behavior when loaded.
 - The benchmark initializes its backend and model once, warms them up, and then measures consecutive training steps without including repeated CUDA compilation in the result.
 - Validation loss now streams validation batches instead of materializing the full batch list before evaluation. This keeps validation memory usage lower on larger datasets.
+- Added optional `save_validation_checkpoints` snapshots so every evaluated model can be compared later instead of losing an earlier generation-quality peak.
+- Added dialogue `.jsonl` datasets with alternating `user`/`assistant` messages. Conversations are expanded turn by turn so each answer is trained with the preceding chat history in its attention context.
 - Added tests that verify validation batch counting and benchmark reproducibility.
 
 ### Русский
 
 - Добавлен детерминированный benchmark одного шага обучения, чтобы сравнивать изменения backend и optimizer на одинаковом synthetic batch.
+- Добавлены простые функции `tokenize`, `detokenize` и `pretokenize`, которые принимают имя токенизатора, путь к BPE-файлу или готовый объект.
+- Новые BPE-артефакты используют версионированное Unicode-aware разбиение слов, чисел, знаков и начальных пробелов. Старые BPE-файлы версии 1 сохраняют прежнее поведение при загрузке.
 - Benchmark инициализирует backend и модель один раз, выполняет прогрев, а затем замеряет последовательные шаги обучения, не включая повторную компиляцию CUDA в результат.
 - Validation loss теперь проходит validation batches потоково, без предварительного создания полного списка batches. На больших датасетах это снижает расход памяти во время validation.
+- Добавлены опциональные снимки `save_validation_checkpoints`, чтобы после обучения можно было сравнить каждую проверенную модель и не потерять более удачный по качеству генерации этап.
+- Добавлен диалоговый формат `.jsonl` с чередующимися сообщениями `user`/`assistant`. Разговор разворачивается по ходам, поэтому каждый ответ обучается с предыдущей историей чата в attention-контексте.
 - Добавлены тесты для подсчёта validation batches и воспроизводимости benchmark.
 
 ## 0.6.0 — 2026-07-14

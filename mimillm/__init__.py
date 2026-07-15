@@ -27,8 +27,11 @@ from .tokenizer import (
     ByteTokenizer,
     UnicodeByteTokenizer,
     create_tokenizer,
+    detokenize,
     load_tokenizer,
+    pretokenize,
     save_tokenizer,
+    tokenize,
     train_bpe_tokenizer,
 )
 from .training import (
@@ -73,6 +76,7 @@ __all__ = [
     "cuda_is_available",
     "discover_question_files",
     "discover_text_files",
+    "detokenize",
     "generate",
     "generate_response",
     "generate_text",
@@ -85,12 +89,14 @@ __all__ = [
     "load_tokenizer",
     "load_text_documents",
     "no_grad",
+    "pretokenize",
     "reset_backend",
     "sample_token",
     "save_checkpoint",
     "save_model",
     "save_safetensors",
     "save_tokenizer",
+    "tokenize",
     "train_from_config",
     "train_bpe_tokenizer",
     "train_model",
@@ -98,4 +104,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
