@@ -370,7 +370,7 @@ CUDA backend реализует forward и backward операции, matmul, at
 
 ### C++ и Python
 
-Установка через pip на Windows x64 содержит готовую C++ DLL. Ручная сборка нужна только при изменении C++-исходников:
+Установка через pip на Windows x64 содержит готовую C++ DLL. На Linux, включая Raspberry Pi OS/Ubuntu arm64, `pip install` автоматически собирает `.so`, если установлен `g++`, `clang++` или `c++`. Ручная сборка нужна только при изменении C++-исходников:
 
 ```powershell
 python tools/build_backend.py --release
@@ -384,6 +384,12 @@ python3 tools/build_backend.py --release
 export MIMILLM_BACKEND=cpp
 ```
 
+Для Raspberry Pi есть готовая установка в venv. Флаг `--system-site-packages` сохраняет доступ к системному пакету HailoRT:
+
+```bash
+./scripts/setup_raspberry_pi.sh
+```
+
 Доступные переменные окружения:
 
 - `MIMILLM_BACKEND=auto|cuda|cpp|python` — выбор backend;
@@ -392,6 +398,28 @@ export MIMILLM_BACKEND=cpp
 - `MIMILLM_CPP_LIBRARY=/path/to/library` — явный путь к DLL или `.so`.
 
 C++ backend подключается через стабильный C ABI. Python backend является читаемой эталонной реализацией и работает без нативной сборки.
+
+### Raspberry Pi AI HAT+ / Hailo-8
+
+Hailo-8 выполняет заранее скомпилированные файлы `.hef`; он не загружает `model.safetensors` и Python-граф mimiLLM напрямую. Поэтому на Raspberry сама модель сейчас выполняется быстрым ARM64 C++ backend, а HailoRT можно проверить и использовать для отдельного готового HEF.
+
+```bash
+python tools/hailo_info.py
+python tools/hailo_info.py --hef model.hef
+```
+
+Те же проверки доступны из Python без обязательной зависимости от HailoRT:
+
+```python
+from mimillm import inspect_hailo_hef, inspect_hailo_runtime
+
+runtime = inspect_hailo_runtime()
+print(runtime.runtime_version, runtime.device_ids)
+hef = inspect_hailo_hef("model.hef")
+print(hef.inputs, hef.outputs)
+```
+
+Компиляция собственной сети в HEF выполняется Hailo Dataflow Compiler на поддерживаемой x86_64-системе, после чего готовый файл переносится на Raspberry. Экспорт decoder-only графа mimiLLM и подтверждённая компиляция его операций в HEF пока не реализованы; Hailo не отображается как backend, пока он фактически не исполняет модель.
 
 ## Проверки
 
@@ -532,7 +560,7 @@ The QA prompt always remains visible to attention. `qa_prompt_weight` optionally
 
 The default `auto` mode selects CUDA first, then threaded C++, then pure Python. All backends use the same architecture, public API, checkpoints, and SafeTensors weights.
 
-On Windows x64, the threaded C++ backend is bundled with the package and installed automatically by pip; no separate compiler or build command is required.
+On Windows x64, the threaded C++ backend is bundled with the package. On Linux, including Raspberry Pi arm64, `pip install` automatically builds the native `.so` when `g++`, `clang++`, or `c++` is available.
 
 CUDA mode requires an NVIDIA GPU, a compatible driver, and the NVIDIA CUDA Toolkit with NVRTC. This system dependency is explicit; CPU modes do not require it. Visual Studio, `cl.exe`, PyTorch, and TensorFlow are not required. NVRTC compiles the bundled kernels when CUDA is first selected in a process, and the NVIDIA Driver API loads them directly.
 
@@ -541,6 +569,14 @@ MIMILLM_BACKEND=cuda python train.py
 ```
 
 The Python API can select it directly with `train_from_config(..., backend="cuda")`. Use `MIMILLM_DISABLE_CUDA=1` to skip CUDA in automatic mode.
+
+For Raspberry Pi, the setup helper creates a venv that can still see the system HailoRT package and verifies the automatically built C++ backend:
+
+```bash
+./scripts/setup_raspberry_pi.sh
+```
+
+Hailo-8 executes precompiled `.hef` artifacts; it does not consume mimiLLM SafeTensors or its Python graph directly. `python tools/hailo_info.py` checks HailoRT and visible devices, while `--hef model.hef` parses the names exposed by a ready HEF. A custom network must be compiled with the Hailo Dataflow Compiler on a supported x86_64 system and then copied to the Pi. mimiLLM does not advertise a Hailo tensor backend until its decoder graph has a tested HEF export and actually runs on the accelerator.
 
 ```bash
 python tools/build_backend.py --release

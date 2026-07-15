@@ -1,5 +1,21 @@
 # Changelog / История изменений
 
+## 0.7.1 — 2026-07-15
+
+### English
+
+- Linux source installs now build and package the native C++ backend automatically when a supported compiler is available, including on Raspberry Pi arm64.
+- Added `inspect_hailo_runtime`, `hailo_is_available`, and `inspect_hailo_hef` for optional HailoRT device discovery and ready-HEF metadata inspection.
+- Added a Raspberry Pi setup script that keeps access to the system HailoRT package while installing mimiLLM in a venv.
+- Documented the tested boundary clearly: Hailo-8 runs compiled HEF artifacts, while mimiLLM SafeTensors currently run through the ARM64 C++ backend.
+
+### Русский
+
+- При установке из исходников на Linux нативный C++ backend теперь автоматически собирается и упаковывается при наличии компилятора, включая Raspberry Pi arm64.
+- Добавлены `inspect_hailo_runtime`, `hailo_is_available` и `inspect_hailo_hef` для необязательной проверки устройств HailoRT и метаданных готового HEF.
+- Добавлен скрипт установки для Raspberry Pi, который сохраняет доступ venv к системному пакету HailoRT.
+- Чётко описана проверенная граница: Hailo-8 запускает скомпилированные HEF, а веса mimiLLM сейчас выполняются через ARM64 C++ backend.
+
 ## 0.7.0 — 2026-07-15
 
 ### English

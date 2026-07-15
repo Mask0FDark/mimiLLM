@@ -15,6 +15,13 @@ from .dataset import (
 from .generation import (
     answer_question, generate, generate_response, generate_text, sample_token,
 )
+from .hailo import (
+    HailoHefInfo,
+    HailoRuntimeInfo,
+    hailo_is_available,
+    inspect_hailo_hef,
+    inspect_hailo_runtime,
+)
 from .layers import Embedding, FeedForward, Linear, RMSNorm, ReLU
 from .losses import cross_entropy
 from .module import Module
@@ -53,6 +60,8 @@ __all__ = [
     "DecoderTransformer",
     "Embedding",
     "FeedForward",
+    "HailoHefInfo",
+    "HailoRuntimeInfo",
     "LanguageModel",
     "Linear",
     "ModelConfig",
@@ -81,7 +90,10 @@ __all__ = [
     "generate_response",
     "generate_text",
     "get_backend",
+    "hailo_is_available",
     "is_grad_enabled",
+    "inspect_hailo_hef",
+    "inspect_hailo_runtime",
     "load_checkpoint",
     "load_model",
     "load_qa_text",
@@ -104,4 +116,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
