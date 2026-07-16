@@ -1,6 +1,12 @@
 """mimiLLM: понятные строительные блоки для decoder-only языковых моделей."""
 
 from .api import LanguageModel, ModelConfig, create_model, load_model, save_model
+from .audit import (
+    DatasetAuditReport,
+    audit_dataset,
+    normalize_training_text,
+    save_dataset_audit,
+)
 from .attention import MultiHeadCausalSelfAttention
 from .backend import get_backend, reset_backend
 from .backend_cuda import CudaBackend, is_available as cuda_is_available
@@ -15,6 +21,12 @@ from .dataset import (
 from .generation import (
     answer_question, generate, generate_response, generate_text, sample_token,
 )
+from .evaluation import (
+    DialogueCheckResult,
+    DialogueEvaluationReport,
+    evaluate_dialogues,
+    save_dialogue_evaluation,
+)
 from .hailo import (
     HailoHefInfo,
     HailoRuntimeInfo,
@@ -27,17 +39,21 @@ from .losses import cross_entropy
 from .module import Module
 from .optim import AdamW, Optimizer, SGD
 from .parameter import Parameter
+from .pipeline import PipelineResult, PipelineStage, train_pipeline
 from .safetensors import load_safetensors, save_safetensors
 from .tensor import Tensor, is_grad_enabled, no_grad
 from .tokenizer import (
     BpeTokenizer,
     ByteTokenizer,
+    TokenizerReport,
     UnicodeByteTokenizer,
+    analyze_tokenizer,
     create_tokenizer,
     detokenize,
     load_tokenizer,
     pretokenize,
     save_tokenizer,
+    save_tokenizer_report,
     tokenize,
     train_bpe_tokenizer,
 )
@@ -58,6 +74,9 @@ __all__ = [
     "CheckpointData",
     "CudaBackend",
     "DecoderTransformer",
+    "DatasetAuditReport",
+    "DialogueCheckResult",
+    "DialogueEvaluationReport",
     "Embedding",
     "FeedForward",
     "HailoHefInfo",
@@ -69,16 +88,21 @@ __all__ = [
     "MultiHeadCausalSelfAttention",
     "Optimizer",
     "Parameter",
+    "PipelineResult",
+    "PipelineStage",
     "RMSNorm",
     "ReLU",
     "SGD",
     "Tensor",
     "TokenDataset",
+    "TokenizerReport",
     "TransformerBlock",
     "TransformerConfig",
     "TrainingResult",
     "UnicodeByteTokenizer",
     "answer_question",
+    "analyze_tokenizer",
+    "audit_dataset",
     "create_model",
     "create_tokenizer",
     "cross_entropy",
@@ -86,6 +110,7 @@ __all__ = [
     "discover_question_files",
     "discover_text_files",
     "detokenize",
+    "evaluate_dialogues",
     "generate",
     "generate_response",
     "generate_text",
@@ -101,17 +126,22 @@ __all__ = [
     "load_tokenizer",
     "load_text_documents",
     "no_grad",
+    "normalize_training_text",
     "pretokenize",
     "reset_backend",
     "sample_token",
     "save_checkpoint",
+    "save_dataset_audit",
+    "save_dialogue_evaluation",
     "save_model",
     "save_safetensors",
     "save_tokenizer",
+    "save_tokenizer_report",
     "tokenize",
     "train_from_config",
     "train_bpe_tokenizer",
     "train_model",
+    "train_pipeline",
     "train_tokenizer_from_config",
     "validation_loss",
 ]

@@ -8,11 +8,13 @@ from mimillm.tokenizer import (
     BpeTokenizer,
     ByteTokenizer,
     UnicodeByteTokenizer,
+    analyze_tokenizer,
     create_tokenizer,
     detokenize,
     load_tokenizer,
     pretokenize,
     save_tokenizer,
+    save_tokenizer_report,
     tokenize,
     train_bpe_tokenizer,
 )
@@ -95,8 +97,10 @@ class BpeTokenizerTests(unittest.TestCase):
         self.assertLess(len(encoded), len(ByteTokenizer().encode(text)))
         self.assertLessEqual(tokenizer.VOCAB_SIZE, 300)
         self.assertGreater(tokenizer.VOCAB_SIZE, ByteTokenizer.VOCAB_SIZE)
-        self.assertEqual(tokenizer.format_version, 2)
+        self.assertEqual(tokenizer.format_version, 3)
         self.assertEqual(tokenizer.pretokenizer, "unicode_words_v1")
+        self.assertTrue(tokenizer.unicode_character_merges)
+        self.assertTrue(all(len(tokenizer.encode(character)) == 1 for character in "Привет"))
 
     def test_bpe_learns_leading_space_pieces(self) -> None:
         tokenizer = train_bpe_tokenizer(
@@ -134,6 +138,29 @@ class BpeTokenizerTests(unittest.TestCase):
         text = "hello hello"
         self.assertEqual(restored.encode(text), legacy.encode(text))
         self.assertEqual(restored.decode(restored.encode(text)), text)
+
+    def test_version_two_tokenizer_remains_compatible(self) -> None:
+        previous = BpeTokenizer(
+            [(208, 191)], pretokenizer="unicode_words_v1", format_version=2,
+        )
+        values = previous.to_dict()
+        self.assertEqual(values["version"], 2)
+        self.assertNotIn("unicode_character_merges", values)
+        restored = BpeTokenizer.from_dict(values)
+        self.assertEqual(restored.to_dict(), values)
+
+    def test_quality_report_measures_unicode_and_writes_json(self) -> None:
+        text = "Привет, модель. Привет, модель."
+        tokenizer = train_bpe_tokenizer([text], vocab_size=300, min_frequency=1)
+        report = analyze_tokenizer(tokenizer, [text])
+        self.assertEqual(report.roundtrip_errors, 0)
+        self.assertEqual(report.unicode_atomic_coverage, 1.0)
+        self.assertLess(report.compression_ratio, 1.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = save_tokenizer_report(
+                report, Path(directory) / "tokenizer_report.json",
+            )
+            self.assertTrue(path.is_file())
 
     def test_bpe_requires_tokenizer_json(self) -> None:
         with self.assertRaisesRegex(ValueError, "tokenizer.json"):

@@ -22,6 +22,10 @@ classifiers = [
 ]
 dependencies = []
 
+[project.scripts]
+mimillm-train = "mimillm.training:main"
+mimillm-train-pipeline = "mimillm.pipeline:main"
+
 [tool.setuptools]
 packages = ["mimillm"]
 

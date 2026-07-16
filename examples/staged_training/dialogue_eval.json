@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "min_pass_rate": 1.0,
+  "generation": {
+    "max_new_tokens": 64,
+    "temperature": 0.0,
+    "top_k": 1
+  },
+  "cases": [
+    {
+      "name": "identity",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Кто ты?"
+        },
+        {
+          "role": "assistant",
+          "contains_all": [
+            "языковая модель"
+          ],
+          "forbidden": [
+            "ChatGPT",
+            "Open Assistant"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "remember-name",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Меня зовут Ира. Запомни это."
+        },
+        {
+          "role": "assistant",
+          "contains_any": [
+            "Ира",
+            "запомнила"
+          ]
+        },
+        {
+          "role": "user",
+          "content": "Как меня зовут?"
+        },
+        {
+          "role": "assistant",
+          "contains_all": [
+            "Ира"
+          ]
+        }
+      ]
+    }
+  ]
+}

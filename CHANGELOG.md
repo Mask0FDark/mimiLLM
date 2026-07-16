@@ -1,5 +1,31 @@
 # Changelog / История изменений
 
+## Unreleased / Не выпущено
+
+### English
+
+- Added `train_pipeline` and the `mimillm-train-pipeline` command for a validated linear `pretrain -> sft` curriculum. Later stages automatically receive the preceding best weights; SFT from scratch and silent output-directory overwrites are rejected by default.
+- Added `lineage.json` and `pipeline_state.json` with stage kind, parent weights, effective configuration, model hash, and tokenizer hash. A resumed stage verifies immutable configuration and tokenizer fields before loading its checkpoint.
+- Added preflight dataset audits for train/validation leakage, duplicate QA pairs, conflicting answers, cross-stage overlap, and configurable foreign-assistant phrases.
+- BPE format v3 reserves atomic pieces for frequent multi-byte Unicode characters before frequency merges. Existing v1 and v2 artifacts remain loadable.
+- Added `analyze_tokenizer`, `TokenizerReport`, automatic `tokenizer_report.json`, and configurable pipeline quality gates for compression, Unicode coverage, and exact round trips.
+- Generation now masks PAD/BOS/SEP and invalid UTF-8 continuations, and cannot finish in the middle of a multi-byte character.
+- Modern JSON configurations that explicitly select tied embeddings now receive the current AdamW/cosine defaults when optional optimizer fields are omitted; legacy untied configurations retain their historical defaults.
+- Added a complete bilingual staged-training example and end-to-end regression tests.
+- Added optional held-out generation gates for each pipeline stage. They test real deterministic single- and multi-turn responses, save `generation_report.json`, and stop the curriculum when model behavior misses the configured pass rate.
+
+### Русский
+
+- Добавлены `train_pipeline` и команда `mimillm-train-pipeline` для проверенной цепочки `pretrain -> sft`. Каждый следующий этап автоматически получает лучшие веса предыдущего; случайный SFT с нуля и незаметная перезапись каталога весов по умолчанию запрещены.
+- Добавлены `lineage.json` и `pipeline_state.json` с типом этапа, родительскими весами, эффективной конфигурацией и хешами модели и токенизатора. Перед продолжением checkpoint проверяются неизменяемые поля конфигурации и токенизатор.
+- Добавлен предварительный аудит данных: утечки train/validation, дубликаты QA, вопросы с конфликтующими ответами, пересечения между этапами и настраиваемые фразы чужих ассистентов.
+- BPE формата v3 сначала создаёт цельные токены для частых многобайтовых Unicode-символов, а затем выполняет частотные слияния. Артефакты v1 и v2 продолжают загружаться.
+- Добавлены `analyze_tokenizer`, `TokenizerReport`, автоматический `tokenizer_report.json` и пороги качества pipeline для сжатия, Unicode-покрытия и точного round trip.
+- Генерация теперь маскирует PAD/BOS/SEP и недопустимые UTF-8-продолжения и не может завершиться посреди многобайтового символа.
+- Современные JSON-конфигурации с явно включёнными связанными embeddings получают актуальные AdamW/cosine defaults, если необязательные поля оптимизатора пропущены; старые untied-конфигурации сохраняют прежнее поведение.
+- Добавлены полный двуязычный пример поэтапного обучения и end-to-end регрессионные тесты.
+- Добавлены опциональные проверки реальной генерации после этапа. Они детерминированно проверяют одно- и многоходовые диалоги, сохраняют `generation_report.json` и не запускают следующий этап, если модель не набрала заданную долю успешных сценариев.
+
 ## 0.8.0 — 2026-07-16
 
 ### English

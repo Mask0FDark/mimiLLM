@@ -1,0 +1,12 @@
+{
+  "steps": 1500,
+  "learning_rate": 0.0001,
+  "warmup_steps": 60,
+  "validation_interval": 100,
+  "checkpoint_interval": 100,
+  "save_validation_checkpoints": true,
+  "seed": 43,
+  "text_ratio": 0.1,
+  "qa_answer_prefix_weight": 2.0,
+  "qa_answer_prefix_tokens": 16
+}

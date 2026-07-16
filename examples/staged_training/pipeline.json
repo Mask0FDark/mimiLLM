@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "base_config": "model.json",
+  "tokenizer": {
+    "type": "bpe",
+    "path": "tokenizer.json",
+    "vocab_size": 1024,
+    "min_frequency": 2,
+    "ensure_unicode_characters": true
+  },
+  "dataset_checks": {
+    "enabled": true,
+    "forbidden_phrases": [
+      "Open Assistant",
+      "ChatGPT"
+    ]
+  },
+  "stages": [
+    {
+      "name": "language",
+      "kind": "pretrain",
+      "config": "pretrain.json",
+      "output_dir": "weights/language"
+    },
+    {
+      "name": "dialogue",
+      "kind": "sft",
+      "config": "sft.json",
+      "output_dir": "weights/dialogue"
+    }
+  ]
+}

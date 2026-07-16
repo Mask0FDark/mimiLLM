@@ -8,11 +8,48 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 
 _LEGACY_BPE_CHUNKS = re.compile(r"\s+|[^\s]+")
+_WORD_PATTERN = re.compile(r"\w+", re.UNICODE)
+
+
+@dataclass(frozen=True)
+class TokenizerReport:
+    """Measured tokenizer quality on a concrete corpus.
+
+    ``compression_ratio`` compares produced tokens with the UTF-8 byte count;
+    lower is better. ``unicode_atomic_coverage`` is the frequency-weighted share
+    of non-ASCII characters represented by one token instead of a partial byte
+    sequence. The report deliberately measures a corpus rather than claiming
+    that a vocabulary is good only because it can round-trip arbitrary text.
+    """
+
+    documents: int
+    characters: int
+    words: int
+    utf8_bytes: int
+    tokens: int
+    unique_tokens: int
+    vocab_size: int
+    raw_byte_tokens: int
+    non_ascii_byte_tokens: int
+    roundtrip_errors: int
+    replacement_characters: int
+    compression_ratio: float
+    tokens_per_word: float
+    vocab_utilization: float
+    unicode_atomic_coverage: float
+    warnings: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Returns a JSON-serializable representation."""
+        values = asdict(self)
+        values["warnings"] = list(self.warnings)
+        return values
 
 
 def _unicode_group(character: str) -> str:
@@ -112,6 +149,16 @@ class ByteTokenizer:
                 raise ValueError(f"токен вне диапазона словаря: {token}")
         return raw.decode("utf-8", errors="replace")
 
+    def token_bytes(self, token: int) -> bytes | None:
+        """Returns serialized text bytes, or ``None`` for a special token."""
+        if not isinstance(token, int) or isinstance(token, bool):
+            raise TypeError("token must be an integer")
+        if 0 <= token <= 255:
+            return bytes([token])
+        if token in (self.PAD, self.BOS, self.EOS, self.SEP):
+            return None
+        raise ValueError(f"token is outside the vocabulary: {token}")
+
     def encode_qa(self, question: str, answer: str) -> list[int]:
         """Кодирует законченную обучающую пару вопрос–ответ."""
         if not isinstance(question, str) or not isinstance(answer, str):
@@ -201,6 +248,11 @@ class UnicodeByteTokenizer(ByteTokenizer):
         flush_bytes()
         return "".join(parts)
 
+    def token_bytes(self, token: int) -> bytes | None:
+        if token in self._TOKEN_TO_CHAR:
+            return self._TOKEN_TO_CHAR[token].encode("utf-8")
+        return super().token_bytes(token)
+
 
 class BpeTokenizer(ByteTokenizer):
     """Dependency-free byte-level BPE with a lossless UTF-8 fallback.
@@ -211,7 +263,8 @@ class BpeTokenizer(ByteTokenizer):
     representable even when it was absent from the tokenizer corpus.
     """
 
-    FORMAT_VERSION = 2
+    FORMAT_VERSION = 3
+    UNICODE_PRETOKENIZER_VERSION = 2
     LEGACY_FORMAT_VERSION = 1
     DEFAULT_PRETOKENIZER = "unicode_words_v1"
     LEGACY_PRETOKENIZER = "legacy_whitespace"
@@ -222,8 +275,13 @@ class BpeTokenizer(ByteTokenizer):
         *,
         pretokenizer: str = DEFAULT_PRETOKENIZER,
         format_version: int = FORMAT_VERSION,
+        unicode_character_merges: bool = False,
     ) -> None:
-        if format_version not in (self.LEGACY_FORMAT_VERSION, self.FORMAT_VERSION):
+        if format_version not in (
+            self.LEGACY_FORMAT_VERSION,
+            self.UNICODE_PRETOKENIZER_VERSION,
+            self.FORMAT_VERSION,
+        ):
             raise ValueError(f"unsupported BPE tokenizer version: {format_version!r}")
         if pretokenizer not in (self.DEFAULT_PRETOKENIZER, self.LEGACY_PRETOKENIZER):
             raise ValueError(
@@ -234,6 +292,12 @@ class BpeTokenizer(ByteTokenizer):
             and pretokenizer != self.LEGACY_PRETOKENIZER
         ):
             raise ValueError("BPE tokenizer version 1 requires legacy_whitespace")
+        if not isinstance(unicode_character_merges, bool):
+            raise TypeError("unicode_character_merges must be a boolean")
+        if format_version < self.FORMAT_VERSION and unicode_character_merges:
+            raise ValueError(
+                "unicode_character_merges metadata requires BPE tokenizer version 3"
+            )
         normalized: list[tuple[int, int]] = []
         pieces: dict[int, bytes] = {value: bytes([value]) for value in range(256)}
         seen: set[tuple[int, int]] = set()
@@ -261,6 +325,7 @@ class BpeTokenizer(ByteTokenizer):
 
         self.format_version = format_version
         self.pretokenizer = pretokenizer
+        self.unicode_character_merges = unicode_character_merges
         self.merges = tuple(normalized)
         self.VOCAB_SIZE = ByteTokenizer.VOCAB_SIZE + len(self.merges)
         self._merge_tokens = {
@@ -339,6 +404,13 @@ class BpeTokenizer(ByteTokenizer):
                 raise ValueError(f"token is outside the BPE vocabulary: {token}")
         return raw.decode("utf-8", errors="replace")
 
+    def token_bytes(self, token: int) -> bytes | None:
+        if not isinstance(token, int) or isinstance(token, bool):
+            raise TypeError("token must be an integer")
+        if token in self._pieces:
+            return self._pieces[token]
+        return super().token_bytes(token)
+
     def to_dict(self) -> dict[str, Any]:
         """Returns the portable tokenizer.json representation."""
         values: dict[str, Any] = {
@@ -356,6 +428,9 @@ class BpeTokenizer(ByteTokenizer):
         }
         if self.format_version >= self.FORMAT_VERSION:
             values["pretokenizer"] = self.pretokenizer
+            values["unicode_character_merges"] = self.unicode_character_merges
+        elif self.format_version >= self.UNICODE_PRETOKENIZER_VERSION:
+            values["pretokenizer"] = self.pretokenizer
         return values
 
     @classmethod
@@ -368,7 +443,7 @@ class BpeTokenizer(ByteTokenizer):
         version = values.get("version")
         if version == cls.LEGACY_FORMAT_VERSION:
             pretokenizer_name = cls.LEGACY_PRETOKENIZER
-        elif version == cls.FORMAT_VERSION:
+        elif version in (cls.UNICODE_PRETOKENIZER_VERSION, cls.FORMAT_VERSION):
             pretokenizer_name = values.get("pretokenizer")
             if pretokenizer_name != cls.DEFAULT_PRETOKENIZER:
                 raise ValueError(
@@ -388,6 +463,11 @@ class BpeTokenizer(ByteTokenizer):
             merges,
             pretokenizer=pretokenizer_name,
             format_version=version,
+            unicode_character_merges=(
+                values.get("unicode_character_merges")
+                if version == cls.FORMAT_VERSION
+                else False
+            ),
         )
         if values.get("vocab_size") != tokenizer.VOCAB_SIZE:
             raise ValueError("BPE tokenizer vocab_size does not match its merges")
@@ -423,8 +503,15 @@ def train_bpe_tokenizer(
     vocab_size: int = 4096,
     min_frequency: int = 2,
     pretokenizer: str = BpeTokenizer.DEFAULT_PRETOKENIZER,
+    ensure_unicode_characters: bool = True,
 ) -> BpeTokenizer:
-    """Learns deterministic byte-level BPE merges from training text only."""
+    """Learns deterministic byte-level BPE merges from training text only.
+
+    By default, frequent multi-byte Unicode characters are made atomic before
+    ordinary frequency merges are learned. This is especially important for
+    Cyrillic: training targets no longer split a common letter into independent
+    UTF-8 bytes, while byte fallback still represents unseen characters.
+    """
     if (
         not isinstance(vocab_size, int)
         or isinstance(vocab_size, bool)
@@ -437,11 +524,15 @@ def train_bpe_tokenizer(
         or min_frequency <= 0
     ):
         raise ValueError("min_frequency must be a positive integer")
+    if not isinstance(ensure_unicode_characters, bool):
+        raise TypeError("ensure_unicode_characters must be a boolean")
     documents = [texts] if isinstance(texts, str) else texts
     sequences: Counter[tuple[int, ...]] = Counter()
+    character_counts: Counter[str] = Counter()
     for text in documents:
         if not isinstance(text, str):
             raise TypeError("every tokenizer training document must be a string")
+        character_counts.update(text)
         for chunk in pretokenize(text, mode=pretokenizer):
             raw = tuple(chunk.encode("utf-8"))
             if raw:
@@ -450,6 +541,63 @@ def train_bpe_tokenizer(
         raise ValueError("BPE tokenizer training corpus is empty")
 
     merges: list[tuple[int, int]] = []
+
+    def add_merge(pair: tuple[int, int]) -> None:
+        nonlocal sequences
+        token_id = ByteTokenizer.VOCAB_SIZE + len(merges)
+        merges.append(pair)
+        replaced: Counter[tuple[int, ...]] = Counter()
+        for sequence, frequency in sequences.items():
+            replaced[BpeTokenizer._replace_pair(sequence, pair, token_id)] += frequency
+        sequences = replaced
+
+    def encode_with_known_merges(raw: tuple[int, ...]) -> tuple[int, ...]:
+        encoded = raw
+        ranks = {pair: rank for rank, pair in enumerate(merges)}
+        while len(encoded) > 1:
+            candidates = {
+                pair for pair in zip(encoded, encoded[1:]) if pair in ranks
+            }
+            if not candidates:
+                break
+            pair = min(candidates, key=ranks.__getitem__)
+            encoded = BpeTokenizer._replace_pair(
+                encoded, pair, ByteTokenizer.VOCAB_SIZE + ranks[pair],
+            )
+        return encoded
+
+    if ensure_unicode_characters:
+        # Reserve complete tokens for the most frequent non-ASCII characters.
+        # A conservative upper bound avoids spending the last vocabulary slots
+        # on only half of a multi-byte scalar.
+        ordered_characters = sorted(
+            (
+                (character, frequency)
+                for character, frequency in character_counts.items()
+                if len(character.encode("utf-8")) > 1
+            ),
+            key=lambda item: (-item[1], ord(item[0])),
+        )
+        for character, _frequency in ordered_characters:
+            raw = tuple(character.encode("utf-8"))
+            if len(raw) - 1 > vocab_size - (ByteTokenizer.VOCAB_SIZE + len(merges)):
+                continue
+            encoded = encode_with_known_merges(raw)
+            while len(encoded) > 1:
+                if ByteTokenizer.VOCAB_SIZE + len(merges) >= vocab_size:
+                    break
+                pair = (encoded[0], encoded[1])
+                known = {value: rank for rank, value in enumerate(merges)}
+                if pair in known:
+                    encoded = BpeTokenizer._replace_pair(
+                        encoded, pair, ByteTokenizer.VOCAB_SIZE + known[pair],
+                    )
+                    continue
+                add_merge(pair)
+                encoded = BpeTokenizer._replace_pair(
+                    encoded, pair, ByteTokenizer.VOCAB_SIZE + len(merges) - 1,
+                )
+
     while ByteTokenizer.VOCAB_SIZE + len(merges) < vocab_size:
         pair_counts: Counter[tuple[int, int]] = Counter()
         for sequence, frequency in sequences.items():
@@ -459,13 +607,110 @@ def train_bpe_tokenizer(
         if not eligible:
             break
         pair = min(eligible, key=lambda item: (-pair_counts[item], item))
-        token_id = ByteTokenizer.VOCAB_SIZE + len(merges)
-        merges.append(pair)
-        replaced: Counter[tuple[int, ...]] = Counter()
-        for sequence, frequency in sequences.items():
-            replaced[BpeTokenizer._replace_pair(sequence, pair, token_id)] += frequency
-        sequences = replaced
-    return BpeTokenizer(merges, pretokenizer=pretokenizer)
+        add_merge(pair)
+    return BpeTokenizer(
+        merges,
+        pretokenizer=pretokenizer,
+        unicode_character_merges=ensure_unicode_characters,
+    )
+
+
+def analyze_tokenizer(
+    tokenizer: ByteTokenizer,
+    texts: Iterable[str] | str,
+) -> TokenizerReport:
+    """Measures compression, fallback use, coverage, and exact round trips."""
+    if not isinstance(tokenizer, ByteTokenizer):
+        raise TypeError("tokenizer must be a ByteTokenizer instance")
+    documents = [texts] if isinstance(texts, str) else texts
+    document_count = 0
+    characters = 0
+    words = 0
+    byte_count = 0
+    token_count = 0
+    raw_byte_tokens = 0
+    non_ascii_byte_tokens = 0
+    roundtrip_errors = 0
+    replacement_characters = 0
+    unique_tokens: set[int] = set()
+    non_ascii_characters: Counter[str] = Counter()
+
+    for text in documents:
+        if not isinstance(text, str):
+            raise TypeError("every tokenizer report document must be a string")
+        document_count += 1
+        encoded = tokenizer.encode(text)
+        decoded = tokenizer.decode(encoded)
+        characters += len(text)
+        words += len(_WORD_PATTERN.findall(text))
+        byte_count += len(text.encode("utf-8"))
+        token_count += len(encoded)
+        unique_tokens.update(encoded)
+        raw_byte_tokens += sum(0 <= token <= 255 for token in encoded)
+        non_ascii_byte_tokens += sum(128 <= token <= 255 for token in encoded)
+        roundtrip_errors += int(decoded != text)
+        replacement_characters += decoded.count("\ufffd") - text.count("\ufffd")
+        non_ascii_characters.update(
+            character for character in text if ord(character) > 127
+        )
+
+    if document_count == 0 or byte_count == 0:
+        raise ValueError("tokenizer report corpus must contain non-empty text")
+    unicode_total = sum(non_ascii_characters.values())
+    unicode_atomic = sum(
+        frequency
+        for character, frequency in non_ascii_characters.items()
+        if len(tokenizer.encode(character)) == 1
+    )
+    compression_ratio = token_count / byte_count
+    unicode_coverage = unicode_atomic / unicode_total if unicode_total else 1.0
+    warnings: list[str] = []
+    if roundtrip_errors:
+        warnings.append("tokenizer does not round-trip every report document")
+    if compression_ratio > 0.75:
+        warnings.append(
+            "token count exceeds 75% of UTF-8 bytes; consider a larger corpus or vocabulary"
+        )
+    if unicode_total and unicode_coverage < 0.95:
+        warnings.append(
+            "less than 95% of non-ASCII characters are represented atomically"
+        )
+    if token_count and raw_byte_tokens / token_count > 0.50:
+        warnings.append("more than half of encoded tokens are raw byte fallback tokens")
+    return TokenizerReport(
+        documents=document_count,
+        characters=characters,
+        words=words,
+        utf8_bytes=byte_count,
+        tokens=token_count,
+        unique_tokens=len(unique_tokens),
+        vocab_size=tokenizer.VOCAB_SIZE,
+        raw_byte_tokens=raw_byte_tokens,
+        non_ascii_byte_tokens=non_ascii_byte_tokens,
+        roundtrip_errors=roundtrip_errors,
+        replacement_characters=max(0, replacement_characters),
+        compression_ratio=compression_ratio,
+        tokens_per_word=token_count / max(1, words),
+        vocab_utilization=len(unique_tokens) / tokenizer.VOCAB_SIZE,
+        unicode_atomic_coverage=unicode_coverage,
+        warnings=tuple(warnings),
+    )
+
+
+def save_tokenizer_report(report: TokenizerReport, path: str | Path) -> Path:
+    """Atomically writes a tokenizer quality report as readable JSON."""
+    if not isinstance(report, TokenizerReport):
+        raise TypeError("report must be a TokenizerReport")
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(report.to_dict(), stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(destination)
+    return destination
 
 
 def load_tokenizer(path: str | Path) -> BpeTokenizer:

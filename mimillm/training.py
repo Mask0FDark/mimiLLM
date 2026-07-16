@@ -22,8 +22,10 @@ from .tensor import no_grad
 from .tokenizer import (
     BpeTokenizer,
     ByteTokenizer,
+    analyze_tokenizer,
     create_tokenizer,
     save_tokenizer,
+    save_tokenizer_report,
     train_bpe_tokenizer,
 )
 from .transformer import DecoderTransformer, TransformerConfig
@@ -346,8 +348,10 @@ def train_tokenizer_from_config(
     vocab_size: int | None = None,
     min_frequency: int = 2,
     pretokenizer: str = BpeTokenizer.DEFAULT_PRETOKENIZER,
+    ensure_unicode_characters: bool = True,
+    report_path: str | Path | None = None,
 ) -> BpeTokenizer:
-    """Trains a byte-level BPE tokenizer from configured train data."""
+    """Trains BPE from train sources and writes a measured quality report."""
     path = Path(config_path).resolve()
     config = TransformerConfig.from_json(path)
     base_dir = path.parent
@@ -356,16 +360,27 @@ def train_tokenizer_from_config(
         target_vocab_size = (
             config.vocab_size if config.tokenizer.strip().lower() == "bpe" else 4096
         )
+    corpus = _tokenizer_corpus(config, base_dir)
     tokenizer = train_bpe_tokenizer(
-        _tokenizer_corpus(config, base_dir),
+        corpus,
         vocab_size=target_vocab_size,
         min_frequency=min_frequency,
         pretokenizer=pretokenizer,
+        ensure_unicode_characters=ensure_unicode_characters,
     )
     destination = Path(output_path) if output_path is not None else base_dir / "tokenizer.json"
     if not destination.is_absolute():
         destination = base_dir / destination
     save_tokenizer(tokenizer, destination)
+    report_destination = (
+        Path(report_path) if report_path is not None
+        else destination.with_name("tokenizer_report.json")
+    )
+    if not report_destination.is_absolute():
+        report_destination = base_dir / report_destination
+    save_tokenizer_report(
+        analyze_tokenizer(tokenizer, corpus), report_destination,
+    )
     return tokenizer
 
 

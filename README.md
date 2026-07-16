@@ -15,10 +15,10 @@ mimiLLM — открытая Python-библиотека для создания
 - сохранить модель в папку с `config.json` и `model.safetensors`;
 - загрузить готовые веса одной функцией;
 - продолжить прерванное обучение из checkpoint;
+- безопасно выполнить цепочку языкового pretraining и диалогового SFT;
+- проверить утечки данных, происхождение весов и качество BPE до долгого запуска;
 - переключаться между CUDA, многопоточным C++ и понятным Python backend;
 - открыть реализацию любого шага — от умножения тензоров до attention и AdamW.
-
-Если хочется увидеть готовый проект модели, посмотрите [m0fdii](https://github.com/Mask0FDark/m0fdii). Там уже лежат данные, конфигурация, обученные веса и короткие скрипты запуска.
 
 ## Установка
 
@@ -229,7 +229,7 @@ text = detokenize(tokens, "weights/tokenizer.json")
 ```json
 {
   "tokenizer": "bpe",
-  "vocab_size": 512
+  "vocab_size": 2048
 }
 ```
 
@@ -240,17 +240,78 @@ from mimillm import train_tokenizer_from_config
 
 tokenizer = train_tokenizer_from_config(
     "config.json",
-    vocab_size=512,
+    vocab_size=2048,
     min_frequency=2,
 )
 print(tokenizer.VOCAB_SIZE)
 ```
 
-Если корпус слишком маленький, фактический словарь может быть меньше запрошенного. В этом случае используйте напечатанное значение как `vocab_size` в `config.json`. После сохранения модели `save_model` кладёт `tokenizer.json` рядом с `model.safetensors`, а `load_model` загружает его автоматически.
+Функция сохраняет не только `tokenizer.json`, но и `tokenizer_report.json`. В отчёте есть число токенов на UTF-8-байт и слово, использование byte fallback, покрытие Unicode и проверка точного обратного преобразования. Обратимость сама по себе больше не считается достаточной проверкой качества.
+
+Новый формат BPE сначала создаёт цельные токены для частых многобайтовых Unicode-символов, а затем обучает обычные частотные слияния. Поэтому русская буква из обучающего корпуса не становится двумя независимыми byte-целями. Для модели в несколько миллионов параметров разумная начальная точка — словарь 2 000–4 000, но окончательный размер нужно выбирать по отчёту на конкретном корпусе.
+
+Если корпус слишком маленький, фактический словарь может быть меньше запрошенного. Многоэтапный pipeline автоматически подставляет фактический размер во все этапы. При ручном обучении используйте напечатанное значение как `vocab_size` в `config.json`. После сохранения модели `save_model` кладёт `tokenizer.json` рядом с `model.safetensors`, а `load_model` загружает его автоматически.
 
 Новый BPE разделяет Unicode-слова, числа и знаки, а обычный пробел прикрепляет к следующему слову. Это позволяет учить токены вида `" модель"` и лучше использовать словарь. Формат записан в `tokenizer.json`; старые BPE-файлы версии 1 продолжают загружаться с прежним поведением.
 
-### Скрипт обучения
+### Рекомендуемый способ: обучение по этапам
+
+Для новой модели используйте `pipeline.json`, а не связывайте каталоги весов вручную. Готовый пример находится в [examples/staged_training](examples/staged_training).
+
+Общая архитектура и optimizer-параметры лежат в `model.json`, указанном через
+`base_config`. Файлы этапов содержат только отличия вроде `steps`,
+`learning_rate`, `text_ratio` и путей к данным, поэтому одну архитектуру не
+нужно копировать в несколько больших JSON-файлов.
+
+```powershell
+python train_pipeline.py examples/staged_training/pipeline.json --backend cuda
+```
+
+После установки пакета доступна та же команда:
+
+```powershell
+mimillm-train-pipeline examples/staged_training/pipeline.json --backend cuda
+```
+
+Pipeline выполняет последовательность:
+
+```text
+обучение общего BPE на train-источниках
+        ↓
+causal pretraining только на обычном тексте
+        ↓
+SFT на ответах ассистента с небольшим text replay при необходимости
+```
+
+Первый этап обязан иметь `kind: "pretrain"` и `text_ratio: 1.0`. Следующий этап с `kind: "sft"` автоматически получает лучшие веса предыдущего этапа, новый AdamW и новое расписание learning rate. Запустить SFT с нуля случайно нельзя. `allow_sft_from_scratch: true` существует только для явных диагностических экспериментов.
+
+До первого optimizer step библиотека:
+
+- ищет совпадения между train и validation даже между разными этапами;
+- сообщает о дубликатах и одинаковых вопросах с разными ответами;
+- отклоняет ответы с фразами из `dataset_checks.forbidden_phrases`, например с чужим именем ассистента;
+- создаёт `tokenizer_report.json` и проверяет минимальное Unicode-покрытие и максимальное отношение tokens/byte;
+- проверяет одинаковую архитектуру всех этапов.
+
+Validation loss не проверяет, умеет ли модель реально отвечать. Поэтому этап
+может дополнительно иметь поле `"evaluation": "dialogue_eval.json"`. После
+обучения pipeline загружает лучшие веса, детерминированно выполняет независимые
+одно- и многоходовые диалоги и записывает настоящие ответы в
+`generation_report.json`. Если доля успешных сценариев ниже `min_pass_rate`,
+этап получает статус `quality_failed`, а следующий этап не запускается. Формат
+набора показан в
+[dialogue_eval.json](examples/staged_training/dialogue_eval.json); его вопросы
+не должны встречаться в train.
+
+В каждом каталоге весов появляется `lineage.json`: там записаны тип этапа, родительские веса, эффективная конфигурация и SHA-256 токенизатора и модели. Pipeline не записывает новые веса поверх непустого каталога. Прерванный этап продолжается так:
+
+```powershell
+python train_pipeline.py pipeline.json --backend cuda --resume-stage dialogue
+```
+
+При продолжении можно увеличить `steps` и изменить частоту validation/checkpoint. Изменение архитектуры, данных или токенизатора будет отклонено.
+
+### Обучение одного этапа вручную
 
 Минимальный `train.py` состоит из нескольких строк:
 
@@ -296,8 +357,9 @@ result = train_from_config(
 ```
 
 `resume` продолжает тот же этап: восстанавливает номер шага, optimizer и его
-moments. Для нормального поэтапного обучения используйте `init_from`. Он
-переносит веса, но создаёт новый optimizer и заново запускает warmup и schedule:
+moments. Низкоуровневый `init_from` переносит веса в новый этап, но безопаснее
+использовать `train_pipeline`, который проверяет и записывает всю цепочку.
+При `init_from` создаётся новый optimizer и заново запускаются warmup и schedule:
 
 ```python
 pretrain = train_from_config(
@@ -354,7 +416,9 @@ mimillm/attention.py       causal multi-head self-attention
 mimillm/transformer.py     TransformerConfig и decoder-only модель
 mimillm/optim.py           SGD и AdamW
 mimillm/dataset.py         тексты, вопросы и формирование batch
+mimillm/audit.py           утечки train/validation и загрязнение данных
 mimillm/training.py        полный цикл обучения
+mimillm/pipeline.py        проверенное многоэтапное обучение и lineage
 mimillm/generation.py      авторегрессионная генерация
 mimillm/safetensors.py     чтение и запись переносимых весов
 mimillm/checkpoint.py      checkpoint для продолжения обучения
@@ -364,7 +428,7 @@ mimillm/checkpoint.py      checkpoint для продолжения обучен
 
 Выбор токенизатора хранится в `config.json`, и `load_model` автоматически использует его при генерации. Для BPE рядом с весами должен лежать тот же `tokenizer.json`. Менять `tokenizer` или `vocab_size` уже после обучения нельзя: формы embedding и выходного слоя будут другими, поэтому нужно начать новое обучение.
 
-Transformer использует pre-norm блоки, causal mask, обучаемые позиционные embedding и отдельную выходную проекцию. Это настоящая авторегрессионная модель: во время генерации она много раз вычисляет logits и каждый раз выбирает следующий токен.
+Transformer использует pre-norm блоки, causal mask и обучаемые позиционные embedding. По умолчанию входная embedding-матрица связана с выходными logits. Во время генерации модель много раз вычисляет logits и каждый раз выбирает следующий токен; специальные токены и продолжения, нарушающие UTF-8, отфильтровываются до sampling.
 
 ## Веса и checkpoint — не одно и то же
 
@@ -513,6 +577,42 @@ data/question/validation/
 
 Text directories accept recursive UTF-8 `.txt`, `.md`, and `.text` documents. Question directories accept `.txt` files made of `Вопрос:` and `Ответ:` blocks and dialogue `.jsonl` files. Each JSONL line contains one `{"messages": [...]}` object with strictly alternating `user` and `assistant` roles. Set the paths and `text_ratio` in `config.json`, then call:
 
+For a new model, the recommended entry point is the checked staged pipeline in
+[examples/staged_training](examples/staged_training):
+
+```bash
+mimillm-train-pipeline examples/staged_training/pipeline.json --backend auto
+```
+
+From a source checkout, `python train_pipeline.py ...` runs the same command.
+The pipeline trains one shared tokenizer from train sources, requires a
+text-only causal `pretrain` stage first, and automatically initializes the next
+answer-only `sft` stage from the preceding best weights. It refuses accidental
+SFT from scratch and refuses to overwrite a non-empty stage directory.
+Shared architecture and optimizer fields can live in one `base_config`; each
+stage JSON then contains only its data/objective and schedule overrides.
+
+Before the first optimizer step it audits train/validation leakage across all
+stages, reports duplicates and conflicting answers, rejects configured foreign
+assistant identities, measures tokenizer quality, and verifies that every
+stage has the same model architecture. Each stage writes `lineage.json` with
+its parent, effective configuration, and tokenizer/model hashes. Resume an
+interrupted stage with:
+
+Validation loss alone does not prove that a model can answer. A stage may set
+`"evaluation": "dialogue_eval.json"` to run deterministic held-out single- and
+multi-turn generation after training. The real responses are stored in
+`generation_report.json`; a pass rate below `min_pass_rate` marks the stage as
+`quality_failed` and prevents the next stage from starting. See the
+[evaluation-suite example](examples/staged_training/dialogue_eval.json), and do
+not reuse its prompts in train data.
+
+```bash
+mimillm-train-pipeline pipeline.json --backend auto --resume-stage dialogue
+```
+
+The lower-level one-stage API remains available:
+
 ```python
 from pathlib import Path
 from mimillm import train_from_config
@@ -562,7 +662,7 @@ configs without the field retain their separate output projection.
 
 Dialogue JSONL is expanded turn by turn. When the second assistant message is trained, the first user/assistant pair is already in its attention context; later targets receive all preceding complete turns that fit the configured context. The loss targets the current assistant answer. This is the appropriate format for teaching a model to use chat history—unrelated single-turn QA records cannot provide that supervision.
 
-See [examples/train_model.py](examples/train_model.py), [examples/use_weights.py](examples/use_weights.py), and the complete [m0fdii model project](https://github.com/Mask0FDark/m0fdii).
+See [examples/train_model.py](examples/train_model.py), [examples/use_weights.py](examples/use_weights.py), and [examples/staged_training](examples/staged_training).
 
 ### Tokenization and QA loss
 
@@ -591,18 +691,30 @@ For a Unicode model, set both fields together:
 }
 ```
 
-For a BPE model, train the tokenizer before training weights:
+For a manually managed BPE model, train the tokenizer before training weights:
 
 ```python
 from mimillm import train_tokenizer_from_config
 
-tokenizer = train_tokenizer_from_config("config.json", vocab_size=512)
+tokenizer = train_tokenizer_from_config("config.json", vocab_size=2048)
 print(tokenizer.VOCAB_SIZE)
 ```
 
-Use the printed value as `vocab_size` if the training corpus is too small to fill the requested vocabulary. A saved BPE model directory contains `config.json`, `model.safetensors`, and `tokenizer.json`.
+This also writes `tokenizer_report.json` with tokens per UTF-8 byte and word,
+raw-byte use, exact round-trip checks, vocabulary utilization, and atomic
+Unicode coverage. New BPE training first reserves complete pieces for frequent
+multi-byte characters, then learns frequency merges. Common Cyrillic letters
+therefore stop being independent partial-byte training targets. A 2,000–4,000
+token vocabulary is a reasonable starting range for a several-million-parameter
+model, but the report on the final corpus should decide it.
+
+Use the printed value as `vocab_size` if the training corpus is too small to fill the requested vocabulary. The staged pipeline applies the actual size automatically. A saved BPE model directory contains `config.json`, `model.safetensors`, and `tokenizer.json`.
 
 New BPE artifacts use a Unicode-aware pre-tokenizer that separates words, numbers, and symbols while attaching horizontal whitespace to the following piece. This allows useful leading-space tokens such as `" model"`. The selected behavior is stored in `tokenizer.json`; version 1 BPE artifacts remain loadable with their original segmentation.
+
+Generation masks PAD/BOS/SEP and token continuations that would create invalid
+UTF-8. EOS is not accepted in the middle of a multi-byte character, preventing
+visible replacement characters caused solely by truncated byte sequences.
 
 The QA prompt always remains visible to attention. `qa_prompt_weight` optionally includes it in the language-model loss, while the two answer-prefix settings give the first answer tokens more influence. Defaults preserve the original answer-only objective. Changing the tokenizer or vocabulary size requires training new weights because the embedding and output shapes change.
 

@@ -25,6 +25,28 @@ class _EosModel:
         return Tensor(values, (1, time, 260))
 
 
+class _Utf8Model:
+    config = _Config()
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.tokenizer = ByteTokenizer()
+
+    def __call__(self, tokens):
+        self.calls += 1
+        time = len(tokens[0])
+        values = [-10.0] * (time * 260)
+        offset = (time - 1) * 260
+        if self.calls == 1:
+            values[offset + 0xD0] = 10.0
+        elif self.calls == 2:
+            values[offset + ByteTokenizer.EOS] = 10.0
+            values[offset + 0x90] = 9.0
+        else:
+            values[offset + ByteTokenizer.EOS] = 10.0
+        return Tensor(values, (1, time, 260))
+
+
 class GenerationTests(unittest.TestCase):
     def test_greedy(self) -> None:
         self.assertEqual(
@@ -62,6 +84,14 @@ class GenerationTests(unittest.TestCase):
         settings = {"max_new_tokens": 2, "temperature": 0.0, "top_k": 1}
         self.assertEqual(generate_response(_EosModel(), "кто ты", **settings), "")
         self.assertEqual(generate_response(_EosModel(), "напиши рассказ", **settings), "")
+
+    def test_generation_does_not_end_inside_utf8_character(self) -> None:
+        model = _Utf8Model()
+        generated = generate(
+            model, [ByteTokenizer.BOS, 1], max_new_tokens=3,
+            temperature=0.0, top_k=1,
+        )
+        self.assertEqual(model.tokenizer.decode(generated), "А")
 
 
 if __name__ == "__main__":

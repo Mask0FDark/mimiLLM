@@ -167,14 +167,17 @@ class TransformerConfig:
     def from_dict(cls, values: dict[str, Any]) -> "TransformerConfig":
         """Отклоняет неизвестные ключи вместо молчаливой опечатки."""
         values = dict(values)
+        legacy_configuration = "tie_word_embeddings" not in values
         # Configurations written before weight tying existed contain a separate
         # output projection. Preserve their architecture when loading them.
         values.setdefault("tie_word_embeddings", False)
         # Older runs used linear decay and AdamW beta2=0.999. Keeping these
-        # values makes an old JSON config reproducible; new configs written by
-        # TransformerConfig use the modern defaults above.
-        values.setdefault("learning_rate_schedule", "linear")
-        values.setdefault("adam_beta2", 0.999)
+        # values makes an old JSON config reproducible. A modern JSON that
+        # explicitly selects weight tying receives the current dataclass
+        # defaults instead of silently falling back to the legacy optimizer.
+        if legacy_configuration:
+            values.setdefault("learning_rate_schedule", "linear")
+            values.setdefault("adam_beta2", 0.999)
         known = set(cls.__dataclass_fields__)
         unknown = sorted(set(values) - known)
         if unknown:

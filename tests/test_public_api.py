@@ -37,7 +37,10 @@ class PublicApiTests(unittest.TestCase):
             "UnicodeByteTokenizer", "BpeTokenizer", "create_tokenizer",
             "train_bpe_tokenizer", "train_tokenizer_from_config",
             "load_tokenizer", "save_tokenizer", "tokenize", "detokenize",
-            "pretokenize",
+            "pretokenize", "TokenizerReport", "analyze_tokenizer",
+            "DatasetAuditReport", "audit_dataset", "PipelineResult",
+            "train_pipeline", "DialogueEvaluationReport", "evaluate_dialogues",
+            "save_dialogue_evaluation",
             "HailoRuntimeInfo", "HailoHefInfo", "hailo_is_available",
             "inspect_hailo_runtime", "inspect_hailo_hef",
         ):
