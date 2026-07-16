@@ -12,6 +12,7 @@ from typing import Any
 from .attention import MultiHeadCausalSelfAttention
 from .layers import Embedding, FeedForward, Linear, RMSNorm
 from .module import Module
+from .parameter import Parameter
 from .tensor import Tensor
 from .tokenizer import BpeTokenizer, ByteTokenizer, UnicodeByteTokenizer, create_tokenizer
 
@@ -22,6 +23,8 @@ class TransformerConfig:
 
     vocab_size: int = ByteTokenizer.VOCAB_SIZE
     tokenizer: str = "byte"
+    tokenizer_path: str = "tokenizer.json"
+    tie_word_embeddings: bool = True
     context_length: int = 96
     d_model: int = 64
     n_layers: int = 2
@@ -32,10 +35,18 @@ class TransformerConfig:
     steps: int = 100
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
+    adam_epsilon: float = 1e-8
+    gradient_clip_norm: float = 1.0
+    learning_rate_schedule: str = "cosine"
+    min_learning_rate_ratio: float = 0.1
     warmup_steps: int = 10
     validation_interval: int = 20
     checkpoint_interval: int = 50
     save_validation_checkpoints: bool = False
+    early_stopping_patience: int | None = None
+    early_stopping_min_delta: float = 0.0
     seed: int = 42
     text_ratio: float = 0.5
     qa_prompt_weight: float = 0.0
@@ -62,6 +73,8 @@ class TransformerConfig:
             raise ValueError("batches_per_epoch должен быть положительным целым числом или null")
         if not isinstance(self.tokenizer, str):
             raise TypeError("tokenizer must be a string")
+        if not isinstance(self.tie_word_embeddings, bool):
+            raise TypeError("tie_word_embeddings must be a boolean")
         tokenizer_sizes = {
             "byte": ByteTokenizer.VOCAB_SIZE,
             "unicode": UnicodeByteTokenizer.VOCAB_SIZE,
@@ -83,6 +96,23 @@ class TransformerConfig:
             raise ValueError("d_model должен делиться на n_heads")
         if self.learning_rate <= 0.0 or self.weight_decay < 0.0:
             raise ValueError("learning_rate > 0, weight_decay >= 0")
+        if not 0.0 <= self.adam_beta1 < 1.0 or not 0.0 <= self.adam_beta2 < 1.0:
+            raise ValueError("adam_beta1 and adam_beta2 must be in [0, 1)")
+        if self.adam_epsilon <= 0.0:
+            raise ValueError("adam_epsilon must be positive")
+        if not math.isfinite(self.gradient_clip_norm) or self.gradient_clip_norm <= 0.0:
+            raise ValueError("gradient_clip_norm must be finite and positive")
+        if not isinstance(self.learning_rate_schedule, str):
+            raise TypeError("learning_rate_schedule must be a string")
+        if self.learning_rate_schedule.strip().lower() not in {"constant", "linear", "cosine"}:
+            raise ValueError(
+                "learning_rate_schedule must be 'constant', 'linear', or 'cosine'"
+            )
+        if (
+            not math.isfinite(self.min_learning_rate_ratio)
+            or not 0.0 <= self.min_learning_rate_ratio <= 1.0
+        ):
+            raise ValueError("min_learning_rate_ratio must be between 0 and 1")
         if not 0.0 <= self.text_ratio <= 1.0:
             raise ValueError("text_ratio должен быть от 0 до 1")
         if (
@@ -109,6 +139,21 @@ class TransformerConfig:
             raise ValueError("интервалы должны быть положительными, warmup_steps >= 0")
         if not isinstance(self.save_validation_checkpoints, bool):
             raise TypeError("save_validation_checkpoints must be a boolean")
+        if self.early_stopping_patience is not None and (
+            not isinstance(self.early_stopping_patience, int)
+            or isinstance(self.early_stopping_patience, bool)
+            or self.early_stopping_patience <= 0
+        ):
+            raise ValueError("early_stopping_patience must be a positive integer or null")
+        if (
+            not isinstance(self.early_stopping_min_delta, (int, float))
+            or isinstance(self.early_stopping_min_delta, bool)
+            or not math.isfinite(self.early_stopping_min_delta)
+            or self.early_stopping_min_delta < 0.0
+        ):
+            raise ValueError("early_stopping_min_delta must be finite and non-negative")
+        if not isinstance(self.tokenizer_path, str) or not self.tokenizer_path.strip():
+            raise ValueError("tokenizer_path must be a non-empty string")
         data_paths = (
             "text_train_path", "text_validation_path",
             "question_train_path", "question_validation_path",
@@ -121,6 +166,15 @@ class TransformerConfig:
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> "TransformerConfig":
         """Отклоняет неизвестные ключи вместо молчаливой опечатки."""
+        values = dict(values)
+        # Configurations written before weight tying existed contain a separate
+        # output projection. Preserve their architecture when loading them.
+        values.setdefault("tie_word_embeddings", False)
+        # Older runs used linear decay and AdamW beta2=0.999. Keeping these
+        # values makes an old JSON config reproducible; new configs written by
+        # TransformerConfig use the modern defaults above.
+        values.setdefault("learning_rate_schedule", "linear")
+        values.setdefault("adam_beta2", 0.999)
         known = set(cls.__dataclass_fields__)
         unknown = sorted(set(values) - known)
         if unknown:
@@ -202,7 +256,12 @@ class DecoderTransformer(Module):
             setattr(self, name, TransformerBlock(config, rng=rng))
             self._block_names.append(name)
         self.final_norm = RMSNorm(config.d_model)
-        self.output = Linear(config.d_model, config.vocab_size, rng=rng)
+        if config.tie_word_embeddings:
+            self.output = None
+            self.output_bias = Parameter([0.0] * config.vocab_size, (config.vocab_size,))
+        else:
+            self.output = Linear(config.d_model, config.vocab_size, rng=rng)
+            self.output_bias = None
 
     @property
     def blocks(self) -> list[TransformerBlock]:
@@ -230,7 +289,15 @@ class DecoderTransformer(Module):
         hidden = token_vectors + position_vectors
         for block in self.blocks:
             hidden = block(hidden)
-        return self.output(self.final_norm(hidden))
+        normalized = self.final_norm(hidden)
+        if self.output is not None:
+            return self.output(normalized)
+        rows = batch * time
+        logits = normalized.reshape(rows, self.config.d_model).matmul(
+            self.token_embedding.weight.transpose(0, 1)
+        )
+        assert self.output_bias is not None
+        return (logits + self.output_bias).reshape(batch, time, self.config.vocab_size)
 
     def parameter_count(self) -> int:
         """Число обучаемых float32-параметров."""

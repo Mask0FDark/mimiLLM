@@ -139,6 +139,7 @@ my_model/
 {
   "vocab_size": 355,
   "tokenizer": "unicode",
+  "tie_word_embeddings": true,
   "context_length": 96,
   "d_model": 64,
   "n_layers": 2,
@@ -149,6 +150,12 @@ my_model/
   "steps": 2500,
   "learning_rate": 0.0008,
   "weight_decay": 0.01,
+  "adam_beta1": 0.9,
+  "adam_beta2": 0.95,
+  "adam_epsilon": 1e-8,
+  "gradient_clip_norm": 1.0,
+  "learning_rate_schedule": "cosine",
+  "min_learning_rate_ratio": 0.1,
   "warmup_steps": 20,
   "validation_interval": 25,
   "checkpoint_interval": 50,
@@ -173,18 +180,23 @@ my_model/
 - `n_layers` — количество Transformer-блоков;
 - `n_heads` — число attention-голов;
 - `d_mlp` — размер скрытой части feed-forward слоя.
+- `tie_word_embeddings: true` использует одну матрицу и для входных токенов, и для выходных logits. Это освобождает параметры под более крупный BPE-словарь; старые конфигурации без этого поля продолжают загружаться с отдельной выходной матрицей.
 
 Параметры обучения:
 
 - `batch_size` задаёт число примеров в одном batch, а `steps` — общее число обновлений весов; большой batch обрабатывает больше токенов за шаг, поэтому скорость сравнивают по `tok/s`, а не по длительности одного шага;
 - `batches_per_epoch` задаёт длину эпохи; при `null` она рассчитывается по данным автоматически;
-- `learning_rate`, `weight_decay` и `warmup_steps` управляют AdamW;
+- `learning_rate`, `weight_decay`, `adam_beta1`, `adam_beta2` и `adam_epsilon` управляют AdamW;
+- `gradient_clip_norm` ограничивает общую норму градиента и защищает обучение от редких резких скачков;
+- `warmup_steps` линейно поднимает learning rate в начале, после чего `learning_rate_schedule: "cosine"` плавно уменьшает его до `learning_rate × min_learning_rate_ratio`; также доступны `linear` и `constant`;
 - `validation_interval` задаёт частоту проверки validation loss;
 - `checkpoint_interval` задаёт частоту сохранения состояния;
 - `save_validation_checkpoints: true` сохраняет отдельную папку весов для каждой проверки в `weights/validation/step_XXXXXXXX`; это позволяет позже сравнить ответы нескольких этапов обучения, а не только `best` и `last`;
 - `seed` делает инициализацию и выбор batch воспроизводимыми.
 
 `text_ratio` управляет смешиванием источников. При `0.0` модель учится только на вопросах и ответах, при `1.0` — только на обычных текстах. Значение `0.35` означает, что примерно 35% batch будут текстовыми.
+
+По умолчанию новый `TransformerConfig` использует AdamW (`beta1=0.9`, `beta2=0.95`, `epsilon=1e-8`), global gradient clipping `1.0`, линейный warmup и cosine decay до 10% базового learning rate. CUDA и C++ backend автоматически выполняют AdamW и clipping нативными функциями, когда они доступны. Это один согласованный стек оптимизации: одновременно применять AdamW и SGD к одним весам нельзя. Для воспроизведения старых JSON-конфигураций без новых полей сохраняются прежние linear decay и `beta2=0.999`.
 
 В QA-batch вопрос всегда остаётся в attention-контексте. `qa_prompt_weight` задаёт его долю в loss. `qa_answer_prefix_tokens` выбирает начало ответа, а `qa_answer_prefix_weight` усиливает его. Это полезно для маленькой модели: первые слова чаще всего определяют, какой именно ответ был выбран. Значения по умолчанию `0.0`, `0` и `1.0` сохраняют прежнее поведение.
 
@@ -282,6 +294,29 @@ result = train_from_config(
     resume=HERE / "weights" / "training_checkpoint.bin",
 )
 ```
+
+`resume` продолжает тот же этап: восстанавливает номер шага, optimizer и его
+moments. Для нормального поэтапного обучения используйте `init_from`. Он
+переносит веса, но создаёт новый optimizer и заново запускает warmup и schedule:
+
+```python
+pretrain = train_from_config(
+    HERE / "pretrain.json",
+    output_dir=HERE / "pretrain_weights",
+)
+fine_tune = train_from_config(
+    HERE / "sft.json",
+    output_dir=HERE / "sft_weights",
+    init_from=pretrain.weights_dir,
+)
+```
+
+Архитектура и токенизатор этапов должны совпадать. Для BPE один и тот же файл
+можно указать через `tokenizer_path`. `early_stopping_patience` задаёт число
+validation-проверок без улучшения перед остановкой, а
+`early_stopping_min_delta` — минимальное значимое улучшение. Хорошая практическая
+схема: сначала causal pretraining на естественном тексте или полных диалогах,
+затем SFT с `qa_prompt_weight: 0` и loss только на ответах ассистента.
 
 Полный короткий пример находится в [examples/train_model.py](examples/train_model.py).
 
@@ -384,7 +419,9 @@ python3 tools/build_backend.py --release
 export MIMILLM_BACKEND=cpp
 ```
 
-Для Raspberry Pi есть готовая установка в venv. Флаг `--system-site-packages` сохраняет доступ к системному пакету HailoRT:
+Библиотека также проверялась на Raspberry Pi 5 с Ubuntu Server 24.04 arm64.
+Готовый скрипт создаёт изолированный venv, устанавливает mimiLLM и проверяет
+автоматически собранный ARM64 C++ backend:
 
 ```bash
 ./scripts/setup_raspberry_pi.sh
@@ -398,28 +435,6 @@ export MIMILLM_BACKEND=cpp
 - `MIMILLM_CPP_LIBRARY=/path/to/library` — явный путь к DLL или `.so`.
 
 C++ backend подключается через стабильный C ABI. Python backend является читаемой эталонной реализацией и работает без нативной сборки.
-
-### Raspberry Pi AI HAT+ / Hailo-8
-
-Hailo-8 выполняет заранее скомпилированные файлы `.hef`; он не загружает `model.safetensors` и Python-граф mimiLLM напрямую. Поэтому на Raspberry сама модель сейчас выполняется быстрым ARM64 C++ backend, а HailoRT можно проверить и использовать для отдельного готового HEF.
-
-```bash
-python tools/hailo_info.py
-python tools/hailo_info.py --hef model.hef
-```
-
-Те же проверки доступны из Python без обязательной зависимости от HailoRT:
-
-```python
-from mimillm import inspect_hailo_hef, inspect_hailo_runtime
-
-runtime = inspect_hailo_runtime()
-print(runtime.runtime_version, runtime.device_ids)
-hef = inspect_hailo_hef("model.hef")
-print(hef.inputs, hef.outputs)
-```
-
-Компиляция собственной сети в HEF выполняется Hailo Dataflow Compiler на поддерживаемой x86_64-системе, после чего готовый файл переносится на Raspberry. Экспорт decoder-only графа mimiLLM и подтверждённая компиляция его операций в HEF пока не реализованы; Hailo не отображается как backend, пока он фактически не исполняет модель.
 
 ## Проверки
 
@@ -510,6 +525,41 @@ result = train_from_config(
 
 Relative data paths are resolved from the config directory. The root `config.json` and `model.safetensors` keep the lowest-validation-loss model, `last/` keeps the final-step weights, and `training_checkpoint.bin` stores the AdamW state for resuming. Validation covers every supervised token and reports separate `val-qa` and `val-text` batch progress. Set `save_validation_checkpoints` to `true` to retain every evaluated model in `weights/validation/step_XXXXXXXX`, which is useful when generation quality and validation loss do not peak at the same step.
 
+Use `resume` only to continue an interrupted stage: it restores the step and
+AdamW moments. Use `init_from` for curriculum training or supervised fine-tuning:
+it copies compatible model weights but starts a fresh optimizer, warmup, and
+learning-rate schedule.
+
+```python
+pretrain = train_from_config("pretrain.json", output_dir="pretrain_weights")
+sft = train_from_config(
+    "sft.json", output_dir="sft_weights", init_from=pretrain.weights_dir,
+)
+```
+
+Every stage must use the same architecture and exact tokenizer. A shared BPE
+artifact can be selected with `tokenizer_path`. Configure
+`early_stopping_patience` and `early_stopping_min_delta` to stop after repeated
+validation checks without a meaningful improvement. A useful curriculum first
+trains the causal language objective on natural text or complete conversations,
+then runs answer-only SFT with `qa_prompt_weight: 0`.
+
+New `TransformerConfig` instances use a complete AdamW training stack by
+default: `beta1=0.9`, `beta2=0.95`, `epsilon=1e-8`, global gradient clipping at
+`1.0`, linear warmup, and cosine learning-rate decay to 10% of the base rate.
+Configure it with `adam_beta1`, `adam_beta2`, `adam_epsilon`,
+`gradient_clip_norm`, `learning_rate_schedule`, and
+`min_learning_rate_ratio`. The schedule can be `cosine`, `linear`, or
+`constant`. CUDA and C++ backends automatically use their native AdamW and
+clipping implementations when available. These mechanisms form one optimizer
+stack; different optimizers such as AdamW and SGD are not applied to the same
+weights simultaneously.
+
+Set `tie_word_embeddings: true` to reuse the input embedding matrix for output
+logits. This is the default for newly constructed configurations and is useful
+for spending a fixed parameter budget on a larger BPE vocabulary. Legacy JSON
+configs without the field retain their separate output projection.
+
 Dialogue JSONL is expanded turn by turn. When the second assistant message is trained, the first user/assistant pair is already in its attention context; later targets receive all preceding complete turns that fit the configured context. The loss targets the current assistant answer. This is the appropriate format for teaching a model to use chat history—unrelated single-turn QA records cannot provide that supervision.
 
 See [examples/train_model.py](examples/train_model.py), [examples/use_weights.py](examples/use_weights.py), and the complete [m0fdii model project](https://github.com/Mask0FDark/m0fdii).
@@ -570,13 +620,13 @@ MIMILLM_BACKEND=cuda python train.py
 
 The Python API can select it directly with `train_from_config(..., backend="cuda")`. Use `MIMILLM_DISABLE_CUDA=1` to skip CUDA in automatic mode.
 
-For Raspberry Pi, the setup helper creates a venv that can still see the system HailoRT package and verifies the automatically built C++ backend:
+The library has also been tested on a Raspberry Pi 5 running Ubuntu Server
+24.04 arm64. The setup helper creates an isolated venv, installs mimiLLM, and
+verifies the automatically built ARM64 C++ backend:
 
 ```bash
 ./scripts/setup_raspberry_pi.sh
 ```
-
-Hailo-8 executes precompiled `.hef` artifacts; it does not consume mimiLLM SafeTensors or its Python graph directly. `python tools/hailo_info.py` checks HailoRT and visible devices, while `--hef model.hef` parses the names exposed by a ready HEF. A custom network must be compiled with the Hailo Dataflow Compiler on a supported x86_64 system and then copied to the Pi. mimiLLM does not advertise a Hailo tensor backend until its decoder graph has a tested HEF export and actually runs on the accelerator.
 
 ```bash
 python tools/build_backend.py --release

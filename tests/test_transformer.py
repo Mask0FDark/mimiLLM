@@ -3,6 +3,7 @@
 import os
 import random
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 os.environ.setdefault("MIMILLM_BACKEND", "python")
@@ -44,7 +45,23 @@ class TransformerTests(unittest.TestCase):
         model = DecoderTransformer(self.config)
         logits = model([[257, 1, 2, 3]])
         self.assertEqual(logits.shape, (1, 4, 260))
-        self.assertGreater(model.parameter_count(), 4000)
+        self.assertGreater(model.parameter_count(), 2000)
+
+    def test_tied_word_embeddings_reuse_the_input_matrix(self) -> None:
+        tied_config = replace(self.config, tie_word_embeddings=True)
+        untied_config = replace(self.config, tie_word_embeddings=False)
+        tied = DecoderTransformer(tied_config)
+        untied = DecoderTransformer(untied_config)
+
+        self.assertIsNone(tied.output)
+        self.assertEqual(
+            tied.parameter_count(),
+            untied.parameter_count() - self.config.vocab_size * self.config.d_model,
+        )
+        logits = tied([[257, 1, 2, 3]])
+        self.assertEqual(logits.shape, (1, 4, self.config.vocab_size))
+        logits.sum().backward()
+        self.assertIsNotNone(tied.token_embedding.weight.grad)
 
     def test_causal_mask_blocks_future_tokens(self) -> None:
         model = DecoderTransformer(self.config)
@@ -63,6 +80,10 @@ class TransformerTests(unittest.TestCase):
             TransformerConfig(vocab_size=100)
         with self.assertRaisesRegex(ValueError, "text_ratio"):
             TransformerConfig(text_ratio=1.1)
+        with self.assertRaisesRegex(ValueError, "learning_rate_schedule"):
+            TransformerConfig(learning_rate_schedule="magic")
+        with self.assertRaisesRegex(ValueError, "gradient_clip_norm"):
+            TransformerConfig(gradient_clip_norm=0.0)
 
     def test_unicode_tokenizer_changes_vocabulary_and_model_shape(self) -> None:
         config = TransformerConfig(

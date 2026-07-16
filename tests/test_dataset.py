@@ -218,6 +218,33 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(dataset.source_weights(), [("text", 1.0)])
             self.assertGreater(dataset.text_tokens, 0)
 
+    def test_long_qa_training_can_sample_the_end_of_the_answer(self) -> None:
+        class LatestWindowRandom(random.Random):
+            def random(self) -> float:
+                return 0.99
+
+            def randint(self, start: int, stop: int) -> int:
+                return stop
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "qa.jsonl"
+            record = {
+                "messages": [
+                    {"role": "user", "content": "Continue?"},
+                    {"role": "assistant", "content": "abcdefghijklmnopqrstuvwxyz"},
+                ]
+            }
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            dataset = TokenDataset(path)
+            context_length = 8
+            inputs, targets, weights = dataset.sample_batch_with_loss_weights(
+                1, context_length, LatestWindowRandom(1),
+            )
+            sequence = dataset.sequences[0]
+            self.assertEqual(inputs[0], sequence[-(context_length + 1):-1])
+            self.assertEqual(targets[0], sequence[-context_length:])
+            self.assertTrue(all(weight == 1.0 for weight in weights[0]))
+
     def test_text_only_dataset_does_not_require_qa_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             text = Path(directory) / "corpus.txt"

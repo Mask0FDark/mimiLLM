@@ -311,7 +311,6 @@ class TokenDataset:
             if source == "qa":
                 answer_start = self.qa_answer_starts[id(sequence)]
                 earliest_answer_window = max(0, answer_start - actual_size + 1)
-                latest_context_window = min(maximum_start, max(0, answer_start - 1))
                 if rng is None:
                     start = earliest_answer_window
                 elif maximum_start == 0:
@@ -319,7 +318,11 @@ class TokenDataset:
                 elif answer_start < actual_size and rng.random() < 0.7:
                     start = 0
                 else:
-                    start = rng.randint(earliest_answer_window, latest_context_window)
+                    # Long answers need windows that begin inside the answer as
+                    # well. Restricting the latest start to answer_start - 1
+                    # silently left every target after the first context-sized
+                    # answer chunk unseen during training.
+                    start = rng.randint(earliest_answer_window, maximum_start)
             else:
                 if rng is None:
                     start = ((offset + index) * context_length) % (maximum_start + 1)

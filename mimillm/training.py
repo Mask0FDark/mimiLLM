@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .api import save_model
+from .api import load_model, save_model
 from .backend import get_backend, reset_backend
 from .checkpoint import load_checkpoint, save_checkpoint
 from .dataset import TokenDataset, load_qa_text, load_text_documents
@@ -460,8 +460,11 @@ def train_model(
     base_dir: str | Path = ".",
     output_dir: str | Path = "weights",
     resume: str | Path | None = None,
+    init_from: str | Path | None = None,
 ) -> TrainingResult:
     """Trains from configured project data and exports standard reusable weights."""
+    if resume is not None and init_from is not None:
+        raise ValueError("resume and init_from are mutually exclusive")
     project_dir = Path(base_dir).resolve()
     destination = Path(output_dir)
     if not destination.is_absolute():
@@ -472,7 +475,7 @@ def train_model(
     latest_weights_dir = destination / "last"
     best_validation_path = destination / "best_validation.json"
 
-    tokenizer_path = project_dir / "tokenizer.json"
+    tokenizer_path = _resolve(project_dir, config.tokenizer_path)
     tokenizer = create_tokenizer(
         config.tokenizer,
         path=tokenizer_path if config.tokenizer.strip().lower() == "bpe" else None,
@@ -491,10 +494,40 @@ def train_model(
     print("done", flush=True)
     print("Building model and optimizer ...", end=" ", flush=True)
     model = DecoderTransformer(config, tokenizer_model=tokenizer)
+    initialized_from: Path | None = None
+    if init_from is not None:
+        initialized_from = Path(init_from)
+        if not initialized_from.is_absolute():
+            initialized_from = project_dir / initialized_from
+        initialized_from = initialized_from.resolve()
+        source_model = load_model(initialized_from, eval_mode=False)
+        tokenizer_matches = type(source_model.tokenizer) is type(tokenizer)
+        if tokenizer_matches and isinstance(tokenizer, BpeTokenizer):
+            tokenizer_matches = source_model.tokenizer.to_dict() == tokenizer.to_dict()
+        if not tokenizer_matches:
+            raise ValueError(
+                "init_from uses a different tokenizer; staged training must reuse "
+                "the exact same tokenizer vocabulary and merge order"
+            )
+        try:
+            model.load_state_dict(source_model.state_dict())
+        except ValueError as exc:
+            raise ValueError(
+                "init_from model architecture is incompatible with the new stage"
+            ) from exc
     optimizer = AdamW(
-        model.parameters(), config.learning_rate, weight_decay=config.weight_decay
+        model.parameters(), config.learning_rate,
+        beta1=config.adam_beta1,
+        beta2=config.adam_beta2,
+        epsilon=config.adam_epsilon,
+        weight_decay=config.weight_decay,
     )
     print("done", flush=True)
+    if initialized_from is not None:
+        print(
+            f"Initialized weights from {initialized_from}; optimizer and LR schedule reset",
+            flush=True,
+        )
     rng = random.Random(config.seed)
     start_step = 0
     if resume is not None:
@@ -551,6 +584,13 @@ def train_model(
         f"backend={backend_name} | {backend_details} | output={destination}",
         flush=True,
     )
+    print(
+        f"Optimizer: AdamW | betas=({config.adam_beta1:g}, {config.adam_beta2:g}) | "
+        f"weight_decay={config.weight_decay:g} | clip={config.gradient_clip_norm:g} | "
+        f"schedule={config.learning_rate_schedule} | warmup={config.warmup_steps} | "
+        f"min_lr={config.learning_rate * config.min_learning_rate_ratio:g}",
+        flush=True,
+    )
     progress = _TrainingProgress(config.steps, start_step, batches_per_epoch)
 
     last_step = start_step
@@ -562,6 +602,8 @@ def train_model(
     epoch_sources: dict[str, int] = {}
     epoch_timings: dict[str, float] = {}
     interrupted = False
+    stopped_early = False
+    validations_without_improvement = 0
     try:
         for step in range(start_step + 1, config.steps + 1):
             if progress.starts_epoch(step):
@@ -573,7 +615,9 @@ def train_model(
                 epoch_timings = {"forward": 0.0, "backward": 0.0, "optimizer": 0.0}
             started = time.perf_counter()
             optimizer.learning_rate = learning_rate_at(
-                step, config.steps, config.learning_rate, config.warmup_steps
+                step, config.steps, config.learning_rate, config.warmup_steps,
+                schedule=config.learning_rate_schedule,
+                min_ratio=config.min_learning_rate_ratio,
             )
             progress.stage(
                 step,
@@ -634,7 +678,7 @@ def train_model(
                 learning_rate=optimizer.learning_rate,
                 batch_seconds=backward_finished - started,
             )
-            gradient_norm = optimizer.clip_grad_norm(1.0)
+            gradient_norm = optimizer.clip_grad_norm(config.gradient_clip_norm)
             optimizer.step()
             optimizer.zero_grad()
             optimizer_finished = time.perf_counter()
@@ -702,6 +746,7 @@ def train_model(
                         loss=latest_validation_loss,
                         step=step,
                     )
+                previous_best = best_validation_loss
                 if latest_validation_loss < best_validation_loss:
                     best_validation_loss = latest_validation_loss
                     best_validation_step = step
@@ -709,6 +754,17 @@ def train_model(
                     _save_best_validation(
                         best_validation_path, best_validation_loss, best_validation_step
                     )
+                if latest_validation_loss < (
+                    previous_best - config.early_stopping_min_delta
+                ):
+                    validations_without_improvement = 0
+                else:
+                    validations_without_improvement += 1
+                if (
+                    config.early_stopping_patience is not None
+                    and validations_without_improvement >= config.early_stopping_patience
+                ):
+                    stopped_early = True
             progress.update(
                 step,
                 source=train_data.last_source,
@@ -733,6 +789,26 @@ def train_model(
                 )
                 last_checkpoint_step = step
                 save_model(latest_weights_dir, model)
+            if stopped_early:
+                if last_checkpoint_step != step:
+                    save_checkpoint(
+                        checkpoint_path,
+                        model,
+                        optimizer,
+                        config=config.to_dict(),
+                        step=step,
+                        seed=config.seed,
+                    )
+                    last_checkpoint_step = step
+                    save_model(latest_weights_dir, model)
+                progress.close_line()
+                print(
+                    f"Early stopping at step {step}: validation did not improve by "
+                    f"{config.early_stopping_min_delta:g} for "
+                    f"{config.early_stopping_patience} validations",
+                    flush=True,
+                )
+                break
             if ends_epoch:
                 progress.finish_epoch(
                     batches=epoch_batches,
@@ -776,7 +852,8 @@ def train_model(
         save_model(latest_weights_dir, model)
         if best_validation_step < 0:
             save_model(destination, model)
-        print(f"Training complete: {last_step}/{config.steps} steps", flush=True)
+        status = "Training stopped early" if stopped_early else "Training complete"
+        print(f"{status}: {last_step}/{config.steps} steps", flush=True)
         if best_validation_step >= 0:
             print(
                 f"Best validation: {best_validation_loss:.5f} at step "
@@ -792,6 +869,7 @@ def train_from_config(
     *,
     output_dir: str | Path = "weights",
     resume: str | Path | None = None,
+    init_from: str | Path | None = None,
     steps: int | None = None,
     batches_per_epoch: int | None = None,
     backend: str | None = None,
@@ -818,6 +896,7 @@ def train_from_config(
         base_dir=path.parent,
         output_dir=output_dir,
         resume=resume,
+        init_from=init_from,
     )
 
 
@@ -839,6 +918,10 @@ def main(
         help="resume from a training checkpoint",
     )
     parser.add_argument(
+        "--init-from", type=Path,
+        help="initialize a new training stage from reusable model weights",
+    )
+    parser.add_argument(
         "--steps", type=int,
         help="override the total number of optimizer steps from the configuration",
     )
@@ -858,10 +941,14 @@ def main(
     resume = args.resume
     if resume is not None and not resume.is_absolute():
         resume = (Path.cwd() / resume).resolve()
+    init_from = args.init_from
+    if init_from is not None and not init_from.is_absolute():
+        init_from = (Path.cwd() / init_from).resolve()
     result = train_from_config(
         args.config,
         output_dir=output_dir,
         resume=resume,
+        init_from=init_from,
         steps=args.steps,
         batches_per_epoch=args.batches_per_epoch,
         backend=args.backend,

@@ -13,6 +13,7 @@ from mimillm.optim import AdamW
 from mimillm.transformer import DecoderTransformer, TransformerConfig
 from mimillm import (
     load_model,
+    save_model,
     save_tokenizer,
     train_bpe_tokenizer,
     train_from_config,
@@ -167,6 +168,75 @@ class TrainingSmokeTests(unittest.TestCase):
                 tokenizer.decode(tokenizer.encode("subword BPE строит токены")),
                 "subword BPE строит токены",
             )
+
+
+    def test_init_from_reuses_weights_but_starts_a_new_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for split in ("train", "validation"):
+                destination = root / "question" / split
+                destination.mkdir(parents=True)
+                record = {
+                    "messages": [
+                        {"role": "user", "content": "A?"},
+                        {"role": "assistant", "content": "B."},
+                    ]
+                }
+                (destination / "qa.jsonl").write_text(
+                    json.dumps(record) + "\n", encoding="utf-8",
+                )
+            config = TransformerConfig(
+                context_length=8, d_model=4, n_layers=1, n_heads=1, d_mlp=8,
+                batch_size=1, steps=1, learning_rate=1e-12, weight_decay=0.0,
+                warmup_steps=0, validation_interval=1, checkpoint_interval=1,
+                text_ratio=0.0,
+                question_train_path="question/train",
+                question_validation_path="question/validation",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config.to_dict()), encoding="utf-8")
+
+            source = DecoderTransformer(config)
+            first_source_parameter = next(iter(source.parameters()))
+            first_source_parameter.data[0] = 0.123456
+            source_dir = root / "pretrained"
+            save_model(source_dir, source)
+
+            result = train_from_config(
+                config_path, output_dir=root / "fine_tuned", init_from=source_dir,
+            )
+            first_result_parameter = next(iter(result.model.parameters()))
+            self.assertAlmostEqual(first_result_parameter.data[0], 0.123456, places=6)
+            self.assertEqual(result.step, 1)
+
+    def test_early_stopping_ends_a_run_after_patience(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for split in ("train", "validation"):
+                destination = root / "question" / split
+                destination.mkdir(parents=True)
+                record = {
+                    "messages": [
+                        {"role": "user", "content": "A?"},
+                        {"role": "assistant", "content": "B."},
+                    ]
+                }
+                (destination / "qa.jsonl").write_text(
+                    json.dumps(record) + "\n", encoding="utf-8",
+                )
+            config = TransformerConfig(
+                context_length=8, d_model=4, n_layers=1, n_heads=1, d_mlp=8,
+                batch_size=1, steps=10, learning_rate=1e-4, weight_decay=0.0,
+                warmup_steps=0, validation_interval=1, checkpoint_interval=10,
+                early_stopping_patience=2, early_stopping_min_delta=100.0,
+                text_ratio=0.0,
+                question_train_path="question/train",
+                question_validation_path="question/validation",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config.to_dict()), encoding="utf-8")
+            result = train_from_config(config_path, output_dir=root / "weights")
+            self.assertEqual(result.step, 3)
 
 
 if __name__ == "__main__":

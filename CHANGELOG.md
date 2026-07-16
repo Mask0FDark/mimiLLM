@@ -1,20 +1,40 @@
 # Changelog / История изменений
 
+## 0.8.0 — 2026-07-16
+
+### English
+
+- Added `init_from` to start a new training stage from compatible reusable weights while resetting AdamW, warmup, the learning-rate schedule, and the step counter.
+- Added `tokenizer_path` so multiple curriculum-stage configs can explicitly reuse one BPE artifact.
+- Added validation-based early stopping through `early_stopping_patience` and `early_stopping_min_delta`.
+- Fixed QA window sampling so long assistant answers are trained beyond their first context-sized chunk.
+- Added optional tied input/output token embeddings, enabled for newly constructed configurations while legacy JSON models keep their original output projection.
+- Added configurable AdamW betas and epsilon, gradient clipping, and constant/linear/cosine learning-rate schedules. New configurations default to the LLM-oriented AdamW + warmup + cosine stack.
+- Added a reproducible one-example QA overfit diagnostic and regression tests for staged initialization and early stopping.
+- Documented the distinction between causal pretraining, answer-only supervised fine-tuning, checkpoint resume, and weight initialization.
+
+### Русский
+
+- Добавлен `init_from`: новый этап получает совместимые готовые веса, но начинает с нового AdamW, warmup, расписания learning rate и номера шага.
+- Добавлен `tokenizer_path`, чтобы несколько конфигураций поэтапного обучения явно использовали один BPE-артефакт.
+- Добавлена ранняя остановка по validation через `early_stopping_patience` и `early_stopping_min_delta`.
+- Исправлен выбор QA-окон: длинные ответы ассистента теперь обучаются целиком, а не только до первого окна размером с контекст.
+- Добавлены связанные входные и выходные token embeddings. Для новых конфигураций они включены по умолчанию, а старые JSON-модели сохраняют прежнюю отдельную выходную матрицу.
+- Добавлены настройки beta и epsilon AdamW, gradient clipping и расписания learning rate `constant`, `linear`, `cosine`. Новые конфигурации по умолчанию используют ориентированный на LLM стек AdamW + warmup + cosine.
+- Добавлены воспроизводимая диагностика переобучения на одном QA-примере и регрессионные тесты переноса весов и ранней остановки.
+- В документации разделены causal pretraining, SFT только на ответах, продолжение checkpoint и начало нового этапа с готовых весов.
+
 ## 0.7.1 — 2026-07-15
 
 ### English
 
 - Linux source installs now build and package the native C++ backend automatically when a supported compiler is available, including on Raspberry Pi arm64.
-- Added `inspect_hailo_runtime`, `hailo_is_available`, and `inspect_hailo_hef` for optional HailoRT device discovery and ready-HEF metadata inspection.
-- Added a Raspberry Pi setup script that keeps access to the system HailoRT package while installing mimiLLM in a venv.
-- Documented the tested boundary clearly: Hailo-8 runs compiled HEF artifacts, while mimiLLM SafeTensors currently run through the ARM64 C++ backend.
+- Added a generic Raspberry Pi setup helper and verified the ARM64 C++ backend on Raspberry Pi 5 with Ubuntu Server 24.04 arm64.
 
 ### Русский
 
 - При установке из исходников на Linux нативный C++ backend теперь автоматически собирается и упаковывается при наличии компилятора, включая Raspberry Pi arm64.
-- Добавлены `inspect_hailo_runtime`, `hailo_is_available` и `inspect_hailo_hef` для необязательной проверки устройств HailoRT и метаданных готового HEF.
-- Добавлен скрипт установки для Raspberry Pi, который сохраняет доступ venv к системному пакету HailoRT.
-- Чётко описана проверенная граница: Hailo-8 запускает скомпилированные HEF, а веса mimiLLM сейчас выполняются через ARM64 C++ backend.
+- Добавлен обычный установочный скрипт для Raspberry Pi; ARM64 C++ backend проверен на Raspberry Pi 5 с Ubuntu Server 24.04 arm64.
 
 ## 0.7.0 — 2026-07-15
 
