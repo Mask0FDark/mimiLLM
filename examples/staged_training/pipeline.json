@@ -6,7 +6,8 @@
     "path": "tokenizer.json",
     "vocab_size": 1024,
     "min_frequency": 2,
-    "ensure_unicode_characters": true
+    "ensure_unicode_characters": true,
+    "required_pieces": ["mimiLLM"]
   },
   "dataset_checks": {
     "enabled": true,

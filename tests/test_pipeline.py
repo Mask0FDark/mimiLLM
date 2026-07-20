@@ -14,6 +14,7 @@ from mimillm.pipeline import (
     PipelineQualityError,
     PipelineStage,
     _evaluate_generation_candidates,
+    _tokenizer_settings,
     train_pipeline,
 )
 from mimillm.training import TrainingResult
@@ -57,6 +58,15 @@ def _config(*, text_ratio: float) -> dict[str, object]:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_required_pieces_are_only_valid_for_bpe(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires type='bpe'"):
+            _tokenizer_settings({
+                "tokenizer": {
+                    "type": "byte",
+                    "required_pieces": ["model-name"],
+                },
+            })
+
     def setUp(self) -> None:
         self.previous_backend = os.environ.get("MIMILLM_BACKEND")
         os.environ["MIMILLM_BACKEND"] = "python"
@@ -97,8 +107,9 @@ class PipelineTests(unittest.TestCase):
                     "tokenizer": {
                         "type": "bpe",
                         "path": "artifacts/tokenizer.json",
-                        "vocab_size": 300,
+                        "vocab_size": 340,
                         "min_frequency": 1,
+                        "required_pieces": ["mimiLLM"],
                     },
                     "dataset_checks": {"forbidden_phrases": ["Open Assistant"]},
                     "stages": [
@@ -123,6 +134,8 @@ class PipelineTests(unittest.TestCase):
                 result.final_weights, (root / "weights" / "dialogue").resolve(),
             )
             self.assertTrue((root / "artifacts" / "tokenizer.json").is_file())
+            tokenizer = load_model(result.final_weights).tokenizer
+            self.assertEqual(len(tokenizer.encode("mimiLLM")), 1)
             self.assertTrue((root / "tokenizer_report.json").is_file())
             self.assertTrue((root / "pipeline_audit.json").is_file())
             lineage = json.loads(
@@ -374,6 +387,46 @@ class PipelineTests(unittest.TestCase):
             )
             self.assertTrue(candidates["promoted"])
             self.assertEqual(candidates["selected"], "last")
+
+    def test_generation_gate_can_promote_intermediate_validation_weights(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = TransformerConfig.from_dict(_config(text_ratio=1.0))
+            best_model = DecoderTransformer(config)
+            middle_model = DecoderTransformer(config)
+            next(iter(best_model.parameters())).data[0] = 0.1
+            next(iter(middle_model.parameters())).data[0] = 0.7
+            save_model(root, best_model)
+            middle = root / "validation" / "step_00000020"
+            save_model(middle, middle_model)
+            evaluation_path = root / "evaluation.json"
+            _json(evaluation_path, {})
+            stage = PipelineStage(
+                "assistant", "sft", root / "config.json", root,
+                evaluation_path=evaluation_path,
+            )
+            result = TrainingResult(
+                best_model, root, root / "training_checkpoint.bin", 20, False,
+            )
+            failed = DialogueEvaluationReport(
+                cases=2, passed=0, pass_rate=0.0, min_pass_rate=0.5,
+                ok=False, results=(),
+            )
+            passed = DialogueEvaluationReport(
+                cases=2, passed=2, pass_rate=1.0, min_pass_rate=0.5,
+                ok=True, results=(),
+            )
+            with patch(
+                "mimillm.pipeline.evaluate_dialogues",
+                side_effect=(failed, passed),
+            ):
+                report, candidate = _evaluate_generation_candidates(result, stage)
+            self.assertTrue(report.ok)
+            self.assertEqual(candidate, "step_00000020")
+            promoted = load_model(root)
+            self.assertAlmostEqual(
+                next(iter(promoted.parameters())).data[0], 0.7, places=6,
+            )
 
     def test_validation_loss_gate_stops_pipeline_and_updates_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

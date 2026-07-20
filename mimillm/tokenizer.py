@@ -288,6 +288,7 @@ class BpeTokenizer(ByteTokenizer):
         pretokenizer: str = DEFAULT_PRETOKENIZER,
         format_version: int = FORMAT_VERSION,
         unicode_character_merges: bool = False,
+        required_pieces: Iterable[str] = (),
     ) -> None:
         if format_version not in (
             self.LEGACY_FORMAT_VERSION,
@@ -346,6 +347,37 @@ class BpeTokenizer(ByteTokenizer):
         }
         self._merge_ranks = {pair: index for index, pair in enumerate(self.merges)}
         self._pieces = pieces
+        if isinstance(required_pieces, (str, bytes)):
+            raise TypeError("BPE required_pieces must be an iterable of strings")
+        normalized_required: list[str] = []
+        for piece in required_pieces:
+            if not isinstance(piece, str) or not piece:
+                raise ValueError("BPE required pieces must be non-empty strings")
+            if piece in normalized_required:
+                raise ValueError(f"duplicate BPE required piece: {piece!r}")
+            if any(character.isspace() for character in piece):
+                raise ValueError(
+                    "BPE required pieces cannot contain whitespace: "
+                    f"{piece!r}"
+                )
+            encoded_piece = self._encode_piece(piece.encode("utf-8"))
+            if len(encoded_piece) != 1:
+                raise ValueError(
+                    f"BPE required piece is not represented atomically: {piece!r}"
+                )
+            normalized_required.append(piece)
+        if normalized_required and format_version < self.FORMAT_VERSION:
+            raise ValueError(
+                "BPE required_pieces metadata requires tokenizer version 3"
+            )
+        self.required_pieces = tuple(normalized_required)
+        self._required_tokens = {
+            piece: self._encode_piece(piece.encode("utf-8"))[0]
+            for piece in self.required_pieces
+        }
+        self._required_by_length = tuple(
+            sorted(self.required_pieces, key=lambda piece: (-len(piece), piece))
+        )
 
     @staticmethod
     def _replace_pair(
@@ -389,8 +421,32 @@ class BpeTokenizer(ByteTokenizer):
         tokens: list[int] = []
         if add_bos:
             tokens.append(self.BOS)
-        for chunk in pretokenize(text, mode=self.pretokenizer):
-            tokens.extend(self._encode_piece(chunk.encode("utf-8")))
+        if not self.required_pieces:
+            for chunk in pretokenize(text, mode=self.pretokenizer):
+                tokens.extend(self._encode_piece(chunk.encode("utf-8")))
+        else:
+            regular_start = 0
+            index = 0
+            while index < len(text):
+                matched = next(
+                    (
+                        piece for piece in self._required_by_length
+                        if text.startswith(piece, index)
+                    ),
+                    None,
+                )
+                if matched is None:
+                    index += 1
+                    continue
+                regular = text[regular_start:index]
+                for chunk in pretokenize(regular, mode=self.pretokenizer):
+                    tokens.extend(self._encode_piece(chunk.encode("utf-8")))
+                tokens.append(self._required_tokens[matched])
+                index += len(matched)
+                regular_start = index
+            regular = text[regular_start:]
+            for chunk in pretokenize(regular, mode=self.pretokenizer):
+                tokens.extend(self._encode_piece(chunk.encode("utf-8")))
         if add_eos:
             tokens.append(self.EOS)
         return tokens
@@ -441,6 +497,8 @@ class BpeTokenizer(ByteTokenizer):
         if self.format_version >= self.FORMAT_VERSION:
             values["pretokenizer"] = self.pretokenizer
             values["unicode_character_merges"] = self.unicode_character_merges
+            if self.required_pieces:
+                values["required_pieces"] = list(self.required_pieces)
         elif self.format_version >= self.UNICODE_PRETOKENIZER_VERSION:
             values["pretokenizer"] = self.pretokenizer
         return values
@@ -471,6 +529,16 @@ class BpeTokenizer(ByteTokenizer):
         merges = values.get("merges")
         if not isinstance(merges, list):
             raise ValueError("BPE tokenizer merges must be a list")
+        required_pieces = values.get("required_pieces", [])
+        if (
+            not isinstance(required_pieces, list)
+            or not all(isinstance(piece, str) and piece for piece in required_pieces)
+        ):
+            raise ValueError("BPE required_pieces must be a list of non-empty strings")
+        if required_pieces and version != cls.FORMAT_VERSION:
+            raise ValueError(
+                "BPE required_pieces metadata requires tokenizer version 3"
+            )
         tokenizer = cls(
             merges,
             pretokenizer=pretokenizer_name,
@@ -479,6 +547,11 @@ class BpeTokenizer(ByteTokenizer):
                 values.get("unicode_character_merges")
                 if version == cls.FORMAT_VERSION
                 else False
+            ),
+            required_pieces=(
+                required_pieces
+                if version == cls.FORMAT_VERSION
+                else ()
             ),
         )
         if values.get("vocab_size") != tokenizer.VOCAB_SIZE:
@@ -516,6 +589,7 @@ def train_bpe_tokenizer(
     min_frequency: int = 2,
     pretokenizer: str = BpeTokenizer.DEFAULT_PRETOKENIZER,
     ensure_unicode_characters: bool = True,
+    required_pieces: Iterable[str] = (),
 ) -> BpeTokenizer:
     """Learns deterministic byte-level BPE merges from training text only.
 
@@ -538,6 +612,20 @@ def train_bpe_tokenizer(
         raise ValueError("min_frequency must be a positive integer")
     if not isinstance(ensure_unicode_characters, bool):
         raise TypeError("ensure_unicode_characters must be a boolean")
+    if isinstance(required_pieces, (str, bytes)):
+        raise TypeError("required_pieces must be an iterable of strings")
+    normalized_required: list[str] = []
+    for piece in required_pieces:
+        if not isinstance(piece, str) or not piece:
+            raise ValueError("required_pieces must contain non-empty strings")
+        if piece in normalized_required:
+            raise ValueError(f"duplicate required piece: {piece!r}")
+        if any(character.isspace() for character in piece):
+            raise ValueError(
+                "required pieces cannot contain whitespace: "
+                f"{piece!r}"
+            )
+        normalized_required.append(piece)
     documents = [texts] if isinstance(texts, str) else texts
     sequences: Counter[tuple[int, ...]] = Counter()
     character_counts: Counter[str] = Counter()
@@ -610,6 +698,26 @@ def train_bpe_tokenizer(
                     encoded, pair, ByteTokenizer.VOCAB_SIZE + len(merges) - 1,
                 )
 
+    # Domain names, role markers and other important low-frequency strings can
+    # otherwise remain split into raw bytes. Reserve their merge paths before
+    # ordinary frequency merges so fine-tuning cannot over-amplify one byte of
+    # a repeatedly used identifier.
+    for piece in normalized_required:
+        encoded = encode_with_known_merges(tuple(piece.encode("utf-8")))
+        while len(encoded) > 1:
+            if ByteTokenizer.VOCAB_SIZE + len(merges) >= vocab_size:
+                raise ValueError(
+                    f"vocab_size is too small to reserve required piece {piece!r}"
+                )
+            pair = (encoded[0], encoded[1])
+            known = {value: rank for rank, value in enumerate(merges)}
+            if pair in known:
+                token_id = ByteTokenizer.VOCAB_SIZE + known[pair]
+            else:
+                add_merge(pair)
+                token_id = ByteTokenizer.VOCAB_SIZE + len(merges) - 1
+            encoded = BpeTokenizer._replace_pair(encoded, pair, token_id)
+
     while ByteTokenizer.VOCAB_SIZE + len(merges) < vocab_size:
         pair_counts: Counter[tuple[int, int]] = Counter()
         for sequence, frequency in sequences.items():
@@ -624,6 +732,7 @@ def train_bpe_tokenizer(
         merges,
         pretokenizer=pretokenizer,
         unicode_character_merges=ensure_unicode_characters,
+        required_pieces=normalized_required,
     )
 
 

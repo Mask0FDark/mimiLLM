@@ -140,6 +140,41 @@ class BpeTokenizerTests(unittest.TestCase):
         self.assertEqual(restored.VOCAB_SIZE, tokenizer.VOCAB_SIZE)
         self.assertEqual(restored.to_dict(), tokenizer.to_dict())
 
+    def test_bpe_reserves_required_low_frequency_piece(self) -> None:
+        tokenizer = train_bpe_tokenizer(
+            ["обычный русский текст", "m0fdii"],
+            vocab_size=300,
+            min_frequency=100,
+            required_pieces=["m0fdii"],
+        )
+        self.assertEqual(len(tokenizer.encode("m0fdii")), 1)
+        self.assertEqual(tokenizer.required_pieces, ("m0fdii",))
+        with tempfile.TemporaryDirectory() as directory:
+            path = save_tokenizer(tokenizer, Path(directory) / "tokenizer.json")
+            restored = load_tokenizer(path)
+        self.assertEqual(restored.required_pieces, ("m0fdii",))
+        self.assertEqual(restored.decode(restored.encode("m0fdii")), "m0fdii")
+
+    def test_bpe_rejects_invalid_or_unreservable_required_piece(self) -> None:
+        with self.assertRaisesRegex(ValueError, "whitespace"):
+            train_bpe_tokenizer(
+                ["small corpus"], required_pieces=["two words"],
+                ensure_unicode_characters=False,
+            )
+        with self.assertRaisesRegex(ValueError, "too small"):
+            train_bpe_tokenizer(
+                ["small corpus"], vocab_size=264, min_frequency=100,
+                required_pieces=["m0fdii"], ensure_unicode_characters=False,
+            )
+        with self.assertRaisesRegex(ValueError, "version 3"):
+            BpeTokenizer(
+                [(109, 48)], format_version=2, required_pieces=["m0"],
+            )
+        legacy_values = BpeTokenizer([(109, 48)], format_version=2).to_dict()
+        legacy_values["required_pieces"] = ["m0"]
+        with self.assertRaisesRegex(ValueError, "version 3"):
+            BpeTokenizer.from_dict(legacy_values)
+
     def test_version_one_tokenizer_remains_compatible(self) -> None:
         legacy = BpeTokenizer(
             [(104, 101), (260, 108)],

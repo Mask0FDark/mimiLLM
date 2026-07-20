@@ -357,7 +357,7 @@ def _tokenizer_settings(values: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "type", "path", "vocab_size", "min_frequency",
         "ensure_unicode_characters", "retrain", "max_compression_ratio",
-        "min_unicode_atomic_coverage",
+        "min_unicode_atomic_coverage", "required_pieces",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -367,6 +367,18 @@ def _tokenizer_settings(values: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("pipeline tokenizer.type must be byte, unicode, or bpe")
     settings = dict(raw)
     settings["type"] = tokenizer_type
+    required_pieces = settings.get("required_pieces", [])
+    if (
+        not isinstance(required_pieces, list)
+        or not all(isinstance(piece, str) and piece for piece in required_pieces)
+        or len(set(required_pieces)) != len(required_pieces)
+    ):
+        raise ValueError(
+            "pipeline tokenizer.required_pieces must be a list of unique "
+            "non-empty strings"
+        )
+    if required_pieces and tokenizer_type != "bpe":
+        raise ValueError("pipeline tokenizer.required_pieces requires type='bpe'")
     return settings
 
 
@@ -388,8 +400,19 @@ def _prepare_tokenizer(
     retrain = settings.get("retrain", False)
     if not isinstance(retrain, bool):
         raise TypeError("tokenizer.retrain must be a boolean")
+    required_pieces = settings.get("required_pieces", [])
     if artifact.is_file() and not retrain:
-        return load_tokenizer(artifact), artifact
+        tokenizer = load_tokenizer(artifact)
+        missing = [
+            piece for piece in required_pieces
+            if len(tokenizer.encode(piece)) != 1
+        ]
+        if missing:
+            raise ValueError(
+                "existing BPE tokenizer does not encode required_pieces atomically: "
+                f"{missing}; set tokenizer.retrain=true for a new full training run"
+            )
+        return tokenizer, artifact
     vocab_size = settings.get("vocab_size", 4096)
     min_frequency = settings.get("min_frequency", 2)
     ensure_unicode = settings.get("ensure_unicode_characters", True)
@@ -399,6 +422,7 @@ def _prepare_tokenizer(
         vocab_size=vocab_size,
         min_frequency=min_frequency,
         ensure_unicode_characters=ensure_unicode,
+        required_pieces=required_pieces,
     )
     save_tokenizer(tokenizer, artifact)
     return tokenizer, artifact
@@ -694,8 +718,22 @@ def _evaluate_generation_candidates(
         raise ValueError("generation candidates require an evaluation suite")
     validation_best = _best_validation_weights(result.weights_dir)
     candidates = [("best_validation", validation_best)]
+    seen = {validation_best.resolve()}
+    validation_dir = result.weights_dir / "validation"
+    if validation_dir.is_dir():
+        for checkpoint in sorted(validation_dir.glob("step_*")):
+            resolved = checkpoint.resolve()
+            if (
+                resolved not in seen
+                and (checkpoint / "model.safetensors").is_file()
+            ):
+                candidates.append((checkpoint.name, checkpoint))
+                seen.add(resolved)
     last_dir = result.weights_dir / "last"
-    if (last_dir / "model.safetensors").is_file():
+    if (
+        last_dir.resolve() not in seen
+        and (last_dir / "model.safetensors").is_file()
+    ):
         candidates.append(("last", last_dir))
 
     evaluated: list[tuple[str, Path, DialogueEvaluationReport]] = []

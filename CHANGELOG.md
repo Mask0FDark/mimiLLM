@@ -1,5 +1,29 @@
 # Changelog / История изменений
 
+## 0.10.3 — 2026-07-21
+
+### English
+
+- BPE training and staged pipelines now accept `required_pieces`. Each listed
+  low-frequency identifier or domain term is guaranteed to become one token;
+  an incompatible existing tokenizer is rejected with an explicit instruction
+  to retrain before starting new weights.
+- Generation gates now compare every saved validation checkpoint in addition
+  to the validation-best and final weights. A passing intermediate checkpoint
+  can be promoted automatically instead of being discarded because loss and
+  greedy response quality peaked at different steps.
+
+### Русский
+
+- Обучение BPE и поэтапный pipeline теперь поддерживают `required_pieces`.
+  Каждый указанный редкий идентификатор или термин гарантированно становится
+  одним токеном; несовместимый готовый токенизатор отклоняется с понятным
+  требованием пересобрать его до обучения новых весов.
+- Generation-gate теперь сравнивает все сохранённые validation-checkpoint,
+  а не только минимальный validation loss и последний шаг. Рабочая
+  промежуточная точка может быть выбрана автоматически, если loss и качество
+  greedy-ответов достигли максимума в разное время.
+
 ## 0.10.2 — 2026-07-20
 
 ### English

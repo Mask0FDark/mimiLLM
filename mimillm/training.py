@@ -400,6 +400,7 @@ def train_tokenizer_from_config(
     min_frequency: int = 2,
     pretokenizer: str = BpeTokenizer.DEFAULT_PRETOKENIZER,
     ensure_unicode_characters: bool = True,
+    required_pieces: tuple[str, ...] | list[str] = (),
     report_path: str | Path | None = None,
 ) -> BpeTokenizer:
     """Trains BPE from train sources and writes a measured quality report."""
@@ -418,6 +419,7 @@ def train_tokenizer_from_config(
         min_frequency=min_frequency,
         pretokenizer=pretokenizer,
         ensure_unicode_characters=ensure_unicode_characters,
+        required_pieces=required_pieces,
     )
     destination = Path(output_path) if output_path is not None else base_dir / "tokenizer.json"
     if not destination.is_absolute():

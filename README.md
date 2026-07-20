@@ -267,6 +267,7 @@ tokenizer = train_tokenizer_from_config(
     "config.json",
     vocab_size=2048,
     min_frequency=2,
+    required_pieces=["my-model"],
 )
 print(tokenizer.VOCAB_SIZE)
 ```
@@ -275,13 +276,36 @@ print(tokenizer.VOCAB_SIZE)
 
 Новый формат BPE сначала создаёт цельные токены для частых многобайтовых Unicode-символов, а затем обучает обычные частотные слияния. Поэтому русская буква из обучающего корпуса не становится двумя независимыми byte-целями. Для модели в несколько миллионов параметров разумная начальная точка — словарь 2 000–4 000, но окончательный размер нужно выбирать по отчёту на конкретном корпусе.
 
+`required_pieces` резервирует цельные токены для важных редких строк, например
+имени модели или специального термина. Это полезно, когда короткий идентификатор
+встречается в SFT намного чаще, чем в языковом корпусе: модель обучает один
+токен вместо отдельных байтов или букв. Элемент может содержать буквы и цифры,
+но не пробельные символы.
+
 Если корпус слишком маленький, фактический словарь может быть меньше запрошенного. Многоэтапный pipeline автоматически подставляет фактический размер во все этапы. При ручном обучении используйте напечатанное значение как `vocab_size` в `config.json`. После сохранения модели `save_model` кладёт `tokenizer.json` рядом с `model.safetensors`, а `load_model` загружает его автоматически.
 
-Новый BPE разделяет Unicode-слова, числа и знаки, а обычный пробел прикрепляет к следующему слову. Это позволяет учить токены вида `" модель"` и лучше использовать словарь. Формат записан в `tokenizer.json`; старые BPE-файлы версии 1 продолжают загружаться с прежним поведением.
+Новый BPE разделяет Unicode-слова, числа и знаки, а обычный пробел прикрепляет к следующему слову. Это позволяет учить токены вида `" модель"` и лучше использовать словарь. Формат записан в `tokenizer.json`; старые BPE-файлы версий 1 и 2 продолжают загружаться с прежним поведением.
 
 ### Рекомендуемый способ: обучение по этапам
 
 Для новой модели используйте `pipeline.json`, а не связывайте каталоги весов вручную. Готовый пример находится в [examples/staged_training](examples/staged_training).
+
+В pipeline те же строки задаются в общем разделе токенизатора:
+
+```json
+{
+  "tokenizer": {
+    "type": "bpe",
+    "path": "artifacts/tokenizer.json",
+    "vocab_size": 2048,
+    "required_pieces": ["my-model"],
+    "retrain": true
+  }
+}
+```
+
+`retrain: true` предназначен только для нового полного запуска. Если веса уже
+существуют, менять BPE нельзя: изменятся значения token id и смысл embedding.
 
 Общая архитектура и optimizer-параметры лежат в `model.json`, указанном через
 `base_config`. Файлы этапов содержат только отличия вроде `steps`,
@@ -846,7 +870,9 @@ For a manually managed BPE model, train the tokenizer before training weights:
 ```python
 from mimillm import train_tokenizer_from_config
 
-tokenizer = train_tokenizer_from_config("config.json", vocab_size=2048)
+tokenizer = train_tokenizer_from_config(
+    "config.json", vocab_size=2048, required_pieces=["my-model"],
+)
 print(tokenizer.VOCAB_SIZE)
 ```
 
@@ -858,9 +884,17 @@ therefore stop being independent partial-byte training targets. A 2,000–4,000
 token vocabulary is a reasonable starting range for a several-million-parameter
 model, but the report on the final corpus should decide it.
 
+`required_pieces` reserves atomic tokens for important low-frequency strings,
+such as a model name or domain identifier. This prevents a frequently repeated
+SFT identifier from training separate byte or character targets. Values may
+mix letters and digits but cannot contain whitespace.
+In a staged pipeline, place the same list in the top-level tokenizer object.
+Set `retrain: true` only for a new full run; an existing model cannot switch to
+a tokenizer with different token ids.
+
 Use the printed value as `vocab_size` if the training corpus is too small to fill the requested vocabulary. The staged pipeline applies the actual size automatically. A saved BPE model directory contains `config.json`, `model.safetensors`, and `tokenizer.json`.
 
-New BPE artifacts use a Unicode-aware pre-tokenizer that separates words, numbers, and symbols while attaching horizontal whitespace to the following piece. This allows useful leading-space tokens such as `" model"`. The selected behavior is stored in `tokenizer.json`; version 1 BPE artifacts remain loadable with their original segmentation.
+New BPE artifacts use a Unicode-aware pre-tokenizer that separates words, numbers, and symbols while attaching horizontal whitespace to the following piece. This allows useful leading-space tokens such as `" model"`. The selected behavior is stored in `tokenizer.json`; version 1 and 2 BPE artifacts remain loadable with their original segmentation.
 
 Generation masks PAD/BOS/SEP and token continuations that would create invalid
 UTF-8. EOS is not accepted in the middle of a multi-byte character, preventing
