@@ -354,7 +354,12 @@ Validation loss не проверяет, умеет ли модель реаль
 `"max_validation_loss": 5.0`. Если лучший validation loss выше порога, этап
 получает статус `quality_failed`, а SFT не начинается. Это не универсальное
 «число качества»: порог выбирают по базовому запуску с тем же корпусом,
-токенизатором и словарём. Провал условия поднимает публичное исключение
+токенизатором и словарём. Если такого базового запуска ещё нет, используйте
+`"min_validation_loss_improvement": 0.5`: pipeline сравнит первую сохранённую
+validation-точку с лучшей и потребует снижения loss хотя бы на указанную
+величину. Для этого оставьте `save_validation_checkpoints: true` и настройте
+как минимум две проверки validation. Абсолютный и относительный критерии можно
+включить одновременно. Провал условия поднимает публичное исключение
 `PipelineQualityError`; консольная команда выводит короткую причину без
 внутреннего traceback.
 
@@ -718,7 +723,12 @@ instead of treating them as usable generation.
 A pretraining stage may also set `"max_validation_loss": 5.0`. If its best
 validation loss remains above the configured limit, the stage is marked
 `quality_failed` and SFT does not start. This threshold is corpus- and
-tokenizer-specific, not a universal quality score. Library callers receive
+tokenizer-specific, not a universal quality score. Without a calibrated
+absolute baseline, set `"min_validation_loss_improvement": 0.5` instead. The
+pipeline then compares the first saved validation snapshot with the best one
+and requires at least that loss reduction. Keep
+`save_validation_checkpoints: true` and schedule at least two validations.
+Both gates may be enabled together. Library callers receive
 `PipelineQualityError`; the command-line entry point prints the concise reason
 without an internal traceback.
 

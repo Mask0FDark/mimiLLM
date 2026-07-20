@@ -58,6 +58,7 @@ class PipelineStage:
     output_dir: Path
     evaluation_path: Path | None = None
     max_validation_loss: float | None = None
+    min_validation_loss_improvement: float | None = None
 
 
 class PipelineQualityError(RuntimeError):
@@ -159,7 +160,7 @@ def _load_pipeline(path: Path) -> tuple[dict[str, Any], list[PipelineStage]]:
         unknown = sorted(
             set(raw) - {
                 "name", "kind", "config", "output_dir", "evaluation",
-                "max_validation_loss",
+                "max_validation_loss", "min_validation_loss_improvement",
             }
         )
         if unknown:
@@ -202,12 +203,29 @@ def _load_pipeline(path: Path) -> tuple[dict[str, Any], list[PipelineStage]]:
                     f"stage {name}.max_validation_loss must be a positive number"
                 )
             max_validation_loss = float(max_validation_loss)
+        min_validation_loss_improvement = raw.get(
+            "min_validation_loss_improvement"
+        )
+        if min_validation_loss_improvement is not None:
+            if (
+                not isinstance(min_validation_loss_improvement, (int, float))
+                or isinstance(min_validation_loss_improvement, bool)
+                or not math.isfinite(min_validation_loss_improvement)
+                or min_validation_loss_improvement <= 0.0
+            ):
+                raise ValueError(
+                    f"stage {name}.min_validation_loss_improvement must be "
+                    "a positive number"
+                )
+            min_validation_loss_improvement = float(
+                min_validation_loss_improvement
+            )
         names.add(name)
         outputs.add(output_dir)
         stages.append(
             PipelineStage(
                 name, kind, config_path, output_dir, evaluation_path,
-                max_validation_loss,
+                max_validation_loss, min_validation_loss_improvement,
             )
         )
     allow_sft = values.get("allow_sft_from_scratch", False)
@@ -608,6 +626,41 @@ def _best_validation(weights_dir: Path) -> tuple[float, int]:
     return float(loss), step
 
 
+def _validation_loss_progress(
+    weights_dir: Path,
+) -> tuple[float, int, float, int]:
+    """Returns the first and best recorded validation losses for a stage."""
+    snapshots = weights_dir / "validation"
+    records: list[tuple[int, float]] = []
+    for path in sorted(snapshots.glob("step_*/validation.json")):
+        try:
+            values = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid validation metadata: {path}") from exc
+        loss = values.get("loss")
+        step = values.get("step")
+        if (
+            not isinstance(loss, (int, float))
+            or isinstance(loss, bool)
+            or not math.isfinite(loss)
+            or not isinstance(step, int)
+            or isinstance(step, bool)
+            or step <= 0
+        ):
+            raise ValueError(f"invalid validation metadata: {path}")
+        records.append((step, float(loss)))
+    if len(records) < 2:
+        raise ValueError(
+            "min_validation_loss_improvement requires at least two validation "
+            "snapshots; enable save_validation_checkpoints and validate more "
+            f"than once: {snapshots}"
+        )
+    records.sort()
+    first_step, first_loss = records[0]
+    best_step, best_loss = min(records, key=lambda item: item[1])
+    return first_loss, first_step, best_loss, best_step
+
+
 def _best_validation_weights(weights_dir: Path) -> Path:
     """Returns the immutable validation-best artifact when metadata provides it."""
     path = weights_dir / "best_validation.json"
@@ -923,18 +976,62 @@ def train_pipeline(
         evaluation_candidate: str | None = None
         validation_loss_gate: dict[str, object] | None = None
         validation_loss_ok = True
-        if not result.interrupted and stage.max_validation_loss is not None:
+        if not result.interrupted and (
+            stage.max_validation_loss is not None
+            or stage.min_validation_loss_improvement is not None
+        ):
             best_loss, best_step = _best_validation(result.weights_dir)
-            validation_loss_ok = best_loss <= stage.max_validation_loss
+            maximum_ok = (
+                stage.max_validation_loss is None
+                or best_loss <= stage.max_validation_loss
+            )
             validation_loss_gate = {
                 "best_loss": best_loss,
                 "best_step": best_step,
                 "max_loss": stage.max_validation_loss,
-                "passed": validation_loss_ok,
+                "min_improvement": stage.min_validation_loss_improvement,
             }
+            improvement_ok = True
+            if stage.min_validation_loss_improvement is not None:
+                first_loss, first_step, recorded_best, recorded_best_step = (
+                    _validation_loss_progress(result.weights_dir)
+                )
+                if abs(recorded_best - best_loss) > 1e-9:
+                    raise ValueError(
+                        "validation snapshots disagree with best_validation.json: "
+                        f"{result.weights_dir}"
+                    )
+                improvement = first_loss - recorded_best
+                improvement_ok = (
+                    improvement >= stage.min_validation_loss_improvement
+                )
+                validation_loss_gate.update({
+                    "first_loss": first_loss,
+                    "first_step": first_step,
+                    "best_step": recorded_best_step,
+                    "improvement": improvement,
+                })
+            validation_loss_ok = maximum_ok and improvement_ok
+            validation_loss_gate["passed"] = validation_loss_ok
+            requirements: list[str] = []
+            if stage.max_validation_loss is not None:
+                requirements.append(f"best<={stage.max_validation_loss:g}")
+            if stage.min_validation_loss_improvement is not None:
+                requirements.append(
+                    "improvement>="
+                    f"{stage.min_validation_loss_improvement:g}"
+                )
+            details = ""
+            if "improvement" in validation_loss_gate:
+                details = (
+                    f" | first={validation_loss_gate['first_loss']:.5f} at "
+                    f"step {validation_loss_gate['first_step']} | improvement="
+                    f"{validation_loss_gate['improvement']:.5f}"
+                )
             print(
                 f"Validation loss gate [{stage.name}]: best={best_loss:.5f} at "
-                f"step {best_step} | required<={stage.max_validation_loss:g} | "
+                f"step {best_step}{details} | required "
+                f"{', '.join(requirements)} | "
                 f"{'passed' if validation_loss_ok else 'failed'}",
                 flush=True,
             )
@@ -986,11 +1083,26 @@ def train_pipeline(
         if status == "quality_failed":
             failures: list[str] = []
             if not validation_loss_ok and validation_loss_gate is not None:
-                failures.append(
-                    "best validation loss "
-                    f"{validation_loss_gate['best_loss']:.5f} exceeds "
-                    f"{validation_loss_gate['max_loss']:g}"
-                )
+                if (
+                    validation_loss_gate.get("max_loss") is not None
+                    and validation_loss_gate["best_loss"]
+                    > validation_loss_gate["max_loss"]
+                ):
+                    failures.append(
+                        "best validation loss "
+                        f"{validation_loss_gate['best_loss']:.5f} exceeds "
+                        f"{validation_loss_gate['max_loss']:g}"
+                    )
+                if (
+                    validation_loss_gate.get("min_improvement") is not None
+                    and validation_loss_gate.get("improvement", -math.inf)
+                    < validation_loss_gate["min_improvement"]
+                ):
+                    failures.append(
+                        "validation loss improvement "
+                        f"{validation_loss_gate['improvement']:.5f} is below "
+                        f"{validation_loss_gate['min_improvement']:g}"
+                    )
             if evaluation is not None and not evaluation.ok:
                 failures.append(
                     f"generation passed {evaluation.passed}/{evaluation.cases} cases; "

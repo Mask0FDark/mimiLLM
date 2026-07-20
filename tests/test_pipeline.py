@@ -412,6 +412,70 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(lineage["status"], "quality_failed")
             self.assertFalse(lineage["validation_loss_gate"]["passed"])
 
+    def test_validation_improvement_gate_records_progress_and_stops(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for split, text in (
+                ("train", "A language training document with several words."),
+                ("validation", "A separate validation sentence with other words."),
+            ):
+                source = root / "data" / "text" / split / "text.txt"
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(text, encoding="utf-8")
+            config = _config(text_ratio=1.0)
+            config["steps"] = 2
+            config["save_validation_checkpoints"] = True
+            _json(root / "config.json", config)
+            _json(
+                root / "pipeline.json",
+                {
+                    "version": 1,
+                    "tokenizer": {"type": "byte"},
+                    "stages": [
+                        {
+                            "name": "language",
+                            "kind": "pretrain",
+                            "config": "config.json",
+                            "output_dir": "weights/language",
+                            "min_validation_loss_improvement": 1000.0,
+                        }
+                    ],
+                },
+            )
+            with self.assertRaisesRegex(
+                PipelineQualityError, "validation loss improvement",
+            ):
+                train_pipeline(root / "pipeline.json", backend="python")
+            lineage = json.loads(
+                (root / "weights" / "language" / "lineage.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+            gate = lineage["validation_loss_gate"]
+            self.assertEqual(gate["first_step"], 1)
+            self.assertEqual(gate["best_step"], 2)
+            self.assertIn("improvement", gate)
+            self.assertFalse(gate["passed"])
+            self.assertGreater(gate["improvement"], 0.0)
+
+            pipeline_path = root / "pipeline.json"
+            pipeline = json.loads(pipeline_path.read_text(encoding="utf-8"))
+            pipeline["stages"][0]["min_validation_loss_improvement"] = (
+                gate["improvement"] / 2.0
+            )
+            _json(pipeline_path, pipeline)
+            result = train_pipeline(
+                pipeline_path, backend="python", resume_stage="language",
+            )
+            self.assertEqual(result.stages[0].step, 2)
+            resumed = json.loads(
+                (root / "weights" / "language" / "lineage.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+            self.assertEqual(resumed["status"], "complete")
+            self.assertTrue(resumed["validation_loss_gate"]["passed"])
+
 
 if __name__ == "__main__":
     unittest.main()

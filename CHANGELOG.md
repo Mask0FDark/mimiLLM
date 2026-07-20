@@ -1,5 +1,17 @@
 # Changelog / История изменений
 
+## 0.10.2 — 2026-07-20
+
+### English
+
+- Added the per-stage `min_validation_loss_improvement` gate. It measures the loss decrease from the first saved validation snapshot to the best snapshot, avoiding uncalibrated absolute thresholds when a new tokenizer or corpus changes the loss scale.
+- Relative and absolute validation-loss gates can be combined, are written to stage lineage, and remain reproducible when a completed checkpoint is resumed without additional optimizer steps.
+
+### Русский
+
+- Добавлена поэтапная проверка `min_validation_loss_improvement`. Она измеряет снижение loss от первой сохранённой validation-точки до лучшей и позволяет не выдумывать абсолютный порог при новом токенизаторе или корпусе.
+- Относительный и абсолютный validation-gate можно включать одновременно; результаты записываются в lineage и воспроизводятся при продолжении уже завершённого checkpoint без дополнительных шагов optimizer.
+
 ## 0.10.1 — 2026-07-20
 
 ### English
