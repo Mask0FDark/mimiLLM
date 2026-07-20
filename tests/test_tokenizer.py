@@ -11,6 +11,7 @@ from mimillm.tokenizer import (
     analyze_tokenizer,
     create_tokenizer,
     detokenize,
+    format_qa_text,
     load_tokenizer,
     pretokenize,
     save_tokenizer,
@@ -42,6 +43,20 @@ class ByteTokenizerTests(unittest.TestCase):
         self.assertEqual(tokens[-1], ByteTokenizer.EOS)
         decoded = self.tokenizer.decode(tokens)
         self.assertEqual(decoded, "Вопрос: Как дела?\nОтвет: Хорошо.")
+
+    def test_training_and_inference_share_one_prompt_formatter(self) -> None:
+        question = "  Сколько дней в неделе?  "
+        answer = "  В неделе семь дней.  "
+        prompt = format_qa_text(question)
+        completed = format_qa_text(question, answer)
+        self.assertEqual(prompt, "Вопрос: Сколько дней в неделе?\nОтвет:")
+        self.assertEqual(completed, prompt + " В неделе семь дней.")
+        self.assertEqual(
+            self.tokenizer.encode_qa(question, answer)[
+                :len(self.tokenizer.encode_prompt(question))
+            ],
+            self.tokenizer.encode_prompt(question),
+        )
 
     def test_prompt_has_no_eos(self) -> None:
         tokens = self.tokenizer.encode_prompt("Кто ты?")

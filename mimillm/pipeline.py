@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
-from .api import load_model
+from .api import load_model, save_model
 from .audit import DatasetAuditReport, audit_dataset, normalize_training_text
 from .backend import reset_backend
 from .dataset import load_qa_text, load_text_documents
@@ -26,6 +27,7 @@ from .tokenizer import (
     UnicodeByteTokenizer,
     analyze_tokenizer,
     create_tokenizer,
+    format_qa_text,
     load_tokenizer,
     save_tokenizer,
     train_bpe_tokenizer,
@@ -55,6 +57,11 @@ class PipelineStage:
     config_path: Path
     output_dir: Path
     evaluation_path: Path | None = None
+    max_validation_loss: float | None = None
+
+
+class PipelineQualityError(RuntimeError):
+    """A stage finished training but did not meet its configured quality gates."""
 
 
 @dataclass(frozen=True)
@@ -95,6 +102,27 @@ def _json_sha256(values: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _parent_artifact_hashes(parent_weights: Path | None) -> dict[str, str | None]:
+    if parent_weights is None:
+        return {"model": None, "config": None, "tokenizer": None}
+    if parent_weights.is_dir():
+        paths = {
+            "model": parent_weights / "model.safetensors",
+            "config": parent_weights / "config.json",
+            "tokenizer": parent_weights / "tokenizer.json",
+        }
+    else:
+        paths = {
+            "model": parent_weights,
+            "config": parent_weights.with_name("config.json"),
+            "tokenizer": parent_weights.with_name("tokenizer.json"),
+        }
+    return {
+        name: _sha256(artifact) if artifact.is_file() else None
+        for name, artifact in paths.items()
+    }
+
+
 def _path(base: Path, value: object, field: str) -> Path:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty path string")
@@ -114,7 +142,7 @@ def _load_pipeline(path: Path) -> tuple[dict[str, Any], list[PipelineStage]]:
     root_unknown = sorted(
         set(values) - {
             "version", "name", "base_config", "tokenizer", "dataset_checks",
-            "allow_sft_from_scratch", "stages",
+            "allow_sft_from_scratch", "initial_weights", "stages",
         }
     )
     if root_unknown:
@@ -129,7 +157,10 @@ def _load_pipeline(path: Path) -> tuple[dict[str, Any], list[PipelineStage]]:
         if not isinstance(raw, dict):
             raise ValueError(f"pipeline stage {index} must be an object")
         unknown = sorted(
-            set(raw) - {"name", "kind", "config", "output_dir", "evaluation"}
+            set(raw) - {
+                "name", "kind", "config", "output_dir", "evaluation",
+                "max_validation_loss",
+            }
         )
         if unknown:
             raise ValueError(f"pipeline stage {index} has unknown fields: {unknown}")
@@ -159,18 +190,44 @@ def _load_pipeline(path: Path) -> tuple[dict[str, Any], list[PipelineStage]]:
                 raise FileNotFoundError(
                     f"stage {name} evaluation suite not found: {evaluation_path}"
                 )
+        max_validation_loss = raw.get("max_validation_loss")
+        if max_validation_loss is not None:
+            if (
+                not isinstance(max_validation_loss, (int, float))
+                or isinstance(max_validation_loss, bool)
+                or not math.isfinite(max_validation_loss)
+                or max_validation_loss <= 0.0
+            ):
+                raise ValueError(
+                    f"stage {name}.max_validation_loss must be a positive number"
+                )
+            max_validation_loss = float(max_validation_loss)
         names.add(name)
         outputs.add(output_dir)
         stages.append(
-            PipelineStage(name, kind, config_path, output_dir, evaluation_path)
+            PipelineStage(
+                name, kind, config_path, output_dir, evaluation_path,
+                max_validation_loss,
+            )
         )
     allow_sft = values.get("allow_sft_from_scratch", False)
     if not isinstance(allow_sft, bool):
         raise TypeError("allow_sft_from_scratch must be a boolean")
-    if stages[0].kind != "pretrain" and not allow_sft:
+    initial_weights = None
+    if "initial_weights" in values:
+        initial_weights = _path(path.parent, values["initial_weights"], "initial_weights")
+        if not (initial_weights / "config.json").is_file() or not (
+            initial_weights / "model.safetensors"
+        ).is_file():
+            raise FileNotFoundError(
+                "initial_weights must contain config.json and model.safetensors: "
+                f"{initial_weights}"
+            )
+    if stages[0].kind != "pretrain" and initial_weights is None and not allow_sft:
         raise ValueError(
-            "the first stage must be pretrain; set allow_sft_from_scratch=true "
-            "only for an intentional diagnostic"
+            "the first stage must be pretrain or the pipeline must declare "
+            "initial_weights; set allow_sft_from_scratch=true only for an "
+            "intentional diagnostic"
         )
     return values, stages
 
@@ -223,7 +280,7 @@ def _corpus(
         )
         path = (base_dir / configured).resolve() if not Path(configured).is_absolute() else Path(configured)
         yield from (
-            f"Вопрос: {question.strip()}\nОтвет: {answer.strip()}"
+            format_qa_text(question, answer)
             for question, answer in load_qa_text(path)
         )
 
@@ -466,7 +523,10 @@ def _lineage(
     status: str,
     result: TrainingResult | None = None,
     evaluation: DialogueEvaluationReport | None = None,
+    validation_loss_gate: dict[str, object] | None = None,
+    evaluation_candidate: str | None = None,
 ) -> dict[str, Any]:
+    parent_hashes = _parent_artifact_hashes(parent_weights)
     values: dict[str, Any] = {
         "format": "mimiLLM-lineage-v1",
         "pipeline": str(pipeline_path),
@@ -481,6 +541,10 @@ def _lineage(
         "tokenizer_sha256": _sha256(tokenizer_path) if tokenizer_path else None,
         "parent_stage": parent_stage,
         "initialized_from": str(parent_weights) if parent_weights else None,
+        "initialized_from_model_sha256": parent_hashes["model"],
+        "initialized_from_config_sha256": parent_hashes["config"],
+        "initialized_from_tokenizer_sha256": parent_hashes["tokenizer"],
+        "optimizer_reset": parent_weights is not None,
         "evaluation_suite": (
             str(stage.evaluation_path) if stage.evaluation_path else None
         ),
@@ -497,12 +561,147 @@ def _lineage(
     if evaluation is not None:
         values["generation_evaluation"] = {
             "report": str(stage.output_dir / "generation_report.json"),
+            "candidate": evaluation_candidate,
             "passed": evaluation.passed,
             "cases": evaluation.cases,
             "pass_rate": evaluation.pass_rate,
             "min_pass_rate": evaluation.min_pass_rate,
         }
+    if validation_loss_gate is not None:
+        values["validation_loss_gate"] = validation_loss_gate
     return values
+
+
+def _best_validation(weights_dir: Path) -> tuple[float, int]:
+    path = weights_dir / "best_validation.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"best validation metadata not found: {path}")
+    values = json.loads(path.read_text(encoding="utf-8"))
+    loss = values.get("loss")
+    step = values.get("step")
+    if (
+        not isinstance(loss, (int, float))
+        or isinstance(loss, bool)
+        or not math.isfinite(loss)
+        or not isinstance(step, int)
+        or isinstance(step, bool)
+    ):
+        raise ValueError(f"invalid best validation metadata: {path}")
+    configured_weights = values.get("weights")
+    best_weights = (
+        Path(configured_weights)
+        if isinstance(configured_weights, str) and configured_weights
+        else weights_dir
+    )
+    if not best_weights.is_absolute():
+        best_weights = (weights_dir / best_weights).resolve()
+    expected_hash = values.get("model_sha256")
+    model_path = best_weights / "model.safetensors"
+    if expected_hash is not None and (
+        not isinstance(expected_hash, str)
+        or not model_path.is_file()
+        or _sha256(model_path) != expected_hash
+    ):
+        raise ValueError(
+            f"best validation metadata does not match its model weights: {path}"
+        )
+    return float(loss), step
+
+
+def _best_validation_weights(weights_dir: Path) -> Path:
+    """Returns the immutable validation-best artifact when metadata provides it."""
+    path = weights_dir / "best_validation.json"
+    if not path.is_file():
+        return weights_dir
+    values = json.loads(path.read_text(encoding="utf-8"))
+    configured = values.get("weights")
+    if not isinstance(configured, str) or not configured:
+        return weights_dir
+    selected = Path(configured)
+    selected = selected if selected.is_absolute() else (weights_dir / selected).resolve()
+    model_path = selected / "model.safetensors"
+    expected_hash = values.get("model_sha256")
+    if expected_hash is not None and (
+        not isinstance(expected_hash, str)
+        or not model_path.is_file()
+        or _sha256(model_path) != expected_hash
+    ):
+        raise ValueError(
+            f"best validation metadata does not match its model weights: {path}"
+        )
+    return selected
+
+
+def _evaluate_generation_candidates(
+    result: TrainingResult,
+    stage: PipelineStage,
+) -> tuple[DialogueEvaluationReport, str]:
+    """Compare lowest-validation-loss and final weights on real generation."""
+    if stage.evaluation_path is None:
+        raise ValueError("generation candidates require an evaluation suite")
+    validation_best = _best_validation_weights(result.weights_dir)
+    candidates = [("best_validation", validation_best)]
+    last_dir = result.weights_dir / "last"
+    if (last_dir / "model.safetensors").is_file():
+        candidates.append(("last", last_dir))
+
+    evaluated: list[tuple[str, Path, DialogueEvaluationReport]] = []
+    for name, weights in candidates:
+        report = evaluate_dialogues(load_model(weights), stage.evaluation_path)
+        evaluated.append((name, weights, report))
+        print(
+            f"Generation candidate [{stage.name}/{name}]: {report.passed}/"
+            f"{report.cases} cases passed ({report.pass_rate:.1%})",
+            flush=True,
+        )
+    selected_name, selected_weights, selected_report = max(
+        evaluated,
+        key=lambda item: (
+            item[2].passed,
+            item[2].pass_rate,
+            item[0] == "best_validation",
+        ),
+    )
+    promoted = selected_name != "best_validation" and selected_report.ok
+    if promoted:
+        archived_best = validation_best
+        if archived_best == result.weights_dir:
+            archived_best = result.weights_dir / "best_validation"
+            save_model(archived_best, load_model(result.weights_dir))
+        save_model(result.weights_dir, load_model(selected_weights))
+        evaluated = [
+            (
+                name,
+                archived_best if name == "best_validation" else weights,
+                report,
+            )
+            for name, weights, report in evaluated
+        ]
+        print(
+            f"Promoted generation candidate [{stage.name}/{selected_name}] to "
+            f"{result.weights_dir}; validation-best weights archived at "
+            f"{archived_best}",
+            flush=True,
+        )
+    save_dialogue_evaluation(
+        selected_report, stage.output_dir / "generation_report.json",
+    )
+    _write_json(
+        stage.output_dir / "generation_candidates.json",
+        {
+            "format": "mimiLLM-generation-candidates-v1",
+            "selected": selected_name,
+            "promoted": promoted,
+            "candidates": {
+                name: {
+                    "weights": str(weights),
+                    **report.to_dict(),
+                }
+                for name, weights, report in evaluated
+            },
+        },
+    )
+    return selected_report, selected_name
 
 
 def train_pipeline(
@@ -513,10 +712,11 @@ def train_pipeline(
 ) -> PipelineResult:
     """Runs a checked linear curriculum and automatically connects its stages.
 
-    The first normal stage is language pretraining. Every later stage receives
-    the previous stage's best reusable weights; users never need to wire
-    ``init_from`` paths manually. Dataset audits and tokenizer reports are
-    written before the first optimizer step.
+    A normal pipeline starts with language pretraining. A follow-up curriculum
+    may instead declare ``initial_weights`` and begin with SFT from an existing
+    compatible model. Every later stage receives the preceding best weights;
+    users never need to wire per-stage ``init_from`` paths manually. Dataset
+    audits and tokenizer reports are written before the first optimizer step.
     """
     path = Path(pipeline_path).resolve()
     pipeline, stages = _load_pipeline(path)
@@ -584,8 +784,12 @@ def train_pipeline(
         reset_backend()
 
     results: list[TrainingResult] = []
-    parent_weights: Path | None = None
-    parent_stage: str | None = None
+    final_weights: Path | None = None
+    parent_weights = (
+        _path(path.parent, pipeline["initial_weights"], "initial_weights")
+        if "initial_weights" in pipeline else None
+    )
+    parent_stage: str | None = "initial_weights" if parent_weights else None
     skipping = resume_stage is not None
     for stage, config in zip(stages, effective_configs):
         lineage_path = stage.output_dir / "lineage.json"
@@ -597,8 +801,18 @@ def train_pipeline(
             previous = json.loads(lineage_path.read_text(encoding="utf-8"))
             if previous.get("status") != "complete":
                 raise ValueError(f"parent stage {stage.name} is not complete")
-            parent_weights = stage.output_dir
+            previous_evaluation = previous.get("generation_evaluation")
+            previous_candidate = (
+                previous_evaluation.get("candidate")
+                if isinstance(previous_evaluation, dict) else None
+            )
+            parent_weights = (
+                stage.output_dir
+                if previous_candidate == "last"
+                else _best_validation_weights(stage.output_dir)
+            )
             parent_stage = stage.name
+            final_weights = stage.output_dir
             continue
         skipping = False
         resume: Path | None = None
@@ -630,17 +844,48 @@ def train_pipeline(
                 raise ValueError(
                     f"stage {stage.name} tokenizer changed since the checkpoint was created"
                 )
+            current_parent_hashes = _parent_artifact_hashes(parent_weights)
+            recorded_parent_hash = previous.get("initialized_from_model_sha256")
+            if (
+                parent_weights is not None
+                and recorded_parent_hash is not None
+                and recorded_parent_hash != current_parent_hashes["model"]
+            ):
+                raise ValueError(
+                    f"stage {stage.name} parent weights changed since the stage began"
+                )
             interrupted = stage.output_dir / "training_checkpoint_interrupted.bin"
             regular = stage.output_dir / "training_checkpoint.bin"
             resume = interrupted if interrupted.is_file() else regular
             if not resume.is_file():
-                raise FileNotFoundError(f"stage checkpoint not found: {resume}")
-            initialized_from = None
+                if previous.get("status") != "running" or "step" in previous:
+                    raise FileNotFoundError(
+                        f"stage checkpoint not found and the stage cannot be safely "
+                        f"restarted: {stage.output_dir}"
+                    )
+                if parent_weights is not None and (
+                    recorded_parent_hash is None
+                    or recorded_parent_hash != current_parent_hashes["model"]
+                ):
+                    raise ValueError(
+                        f"stage {stage.name} cannot restart without the exact verified "
+                        "parent weights"
+                    )
+                resume = None
+                initialized_from = parent_weights
+                print(
+                    f"Stage {stage.name} stopped before its first checkpoint; "
+                    "restarting the stage from its verified inputs",
+                    flush=True,
+                )
+            else:
+                initialized_from = None
         elif stage.output_dir.exists() and any(stage.output_dir.iterdir()):
             raise FileExistsError(
                 f"stage output is not empty: {stage.output_dir}; use a new output "
                 "or resume_stage instead of silently overwriting weights"
             )
+        parent_hashes_before = _parent_artifact_hashes(parent_weights)
         stage.output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(
             lineage_path,
@@ -651,6 +896,17 @@ def train_pipeline(
                 status="running",
             ),
         )
+        _write_json(
+            path.parent / "pipeline_state.json",
+            {
+                "format": "mimiLLM-pipeline-state-v1",
+                "pipeline": str(path),
+                "stage": stage.name,
+                "status": "running",
+                "weights": str(stage.output_dir),
+                "checkpoint": str(resume) if resume is not None else None,
+            },
+        )
         result = train_model(
             config,
             base_dir=stage.config_path.parent,
@@ -658,26 +914,49 @@ def train_pipeline(
             resume=resume,
             init_from=initialized_from,
         )
+        if _parent_artifact_hashes(parent_weights) != parent_hashes_before:
+            raise RuntimeError(
+                f"stage {stage.name} parent artifacts changed while training"
+            )
         results.append(result)
         evaluation: DialogueEvaluationReport | None = None
-        if result.interrupted:
-            status = "interrupted"
-        elif stage.evaluation_path is not None:
-            evaluation = evaluate_dialogues(
-                load_model(result.weights_dir), stage.evaluation_path,
-            )
-            save_dialogue_evaluation(
-                evaluation, stage.output_dir / "generation_report.json",
-            )
-            status = "complete" if evaluation.ok else "quality_failed"
+        evaluation_candidate: str | None = None
+        validation_loss_gate: dict[str, object] | None = None
+        validation_loss_ok = True
+        if not result.interrupted and stage.max_validation_loss is not None:
+            best_loss, best_step = _best_validation(result.weights_dir)
+            validation_loss_ok = best_loss <= stage.max_validation_loss
+            validation_loss_gate = {
+                "best_loss": best_loss,
+                "best_step": best_step,
+                "max_loss": stage.max_validation_loss,
+                "passed": validation_loss_ok,
+            }
             print(
-                f"Generation gate [{stage.name}]: {evaluation.passed}/"
-                f"{evaluation.cases} cases passed ({evaluation.pass_rate:.1%}; "
-                f"required {evaluation.min_pass_rate:.1%})",
+                f"Validation loss gate [{stage.name}]: best={best_loss:.5f} at "
+                f"step {best_step} | required<={stage.max_validation_loss:g} | "
+                f"{'passed' if validation_loss_ok else 'failed'}",
                 flush=True,
             )
+        if result.interrupted:
+            status = "interrupted"
         else:
-            status = "complete"
+            if stage.evaluation_path is not None:
+                evaluation, evaluation_candidate = _evaluate_generation_candidates(
+                    result, stage,
+                )
+                print(
+                    f"Generation gate [{stage.name}]: {evaluation.passed}/"
+                    f"{evaluation.cases} cases passed ({evaluation.pass_rate:.1%}; "
+                    f"required {evaluation.min_pass_rate:.1%})",
+                    flush=True,
+                )
+            generation_ok = evaluation is None or evaluation.ok
+            status = (
+                "complete"
+                if validation_loss_ok and generation_ok
+                else "quality_failed"
+            )
         _write_json(
             lineage_path,
             _lineage(
@@ -685,6 +964,8 @@ def train_pipeline(
                 config=config, tokenizer_path=tokenizer_path,
                 parent_stage=parent_stage, parent_weights=parent_weights,
                 status=status, result=result, evaluation=evaluation,
+                validation_loss_gate=validation_loss_gate,
+                evaluation_candidate=evaluation_candidate,
             ),
         )
         _write_json(
@@ -703,14 +984,30 @@ def train_pipeline(
                 path, tokenizer_path, tuple(results), None, stage.name,
             )
         if status == "quality_failed":
-            raise RuntimeError(
-                f"stage {stage.name} failed its generation quality gate; see "
-                f"{stage.output_dir / 'generation_report.json'}"
+            failures: list[str] = []
+            if not validation_loss_ok and validation_loss_gate is not None:
+                failures.append(
+                    "best validation loss "
+                    f"{validation_loss_gate['best_loss']:.5f} exceeds "
+                    f"{validation_loss_gate['max_loss']:g}"
+                )
+            if evaluation is not None and not evaluation.ok:
+                failures.append(
+                    f"generation passed {evaluation.passed}/{evaluation.cases} cases; "
+                    f"report: {stage.output_dir / 'generation_report.json'}"
+                )
+            raise PipelineQualityError(
+                f"stage {stage.name} failed quality gate(s): {'; '.join(failures)}"
             )
-        parent_weights = result.weights_dir
+        final_weights = result.weights_dir
+        parent_weights = (
+            result.weights_dir
+            if evaluation_candidate == "last"
+            else _best_validation_weights(result.weights_dir)
+        )
         parent_stage = stage.name
     return PipelineResult(
-        path, tokenizer_path, tuple(results), parent_weights, None,
+        path, tokenizer_path, tuple(results), final_weights, None,
     )
 
 
@@ -722,9 +1019,12 @@ def main() -> None:
     parser.add_argument("--backend", choices=("auto", "cuda", "cpp", "python"))
     parser.add_argument("--resume-stage", help="resume one interrupted stage by name")
     args = parser.parse_args()
-    result = train_pipeline(
-        args.pipeline, backend=args.backend, resume_stage=args.resume_stage,
-    )
+    try:
+        result = train_pipeline(
+            args.pipeline, backend=args.backend, resume_stage=args.resume_stage,
+        )
+    except PipelineQualityError as exc:
+        raise SystemExit(f"Pipeline stopped: {exc}") from None
     if result.interrupted_stage:
         print(f"Pipeline interrupted at stage: {result.interrupted_stage}")
     else:

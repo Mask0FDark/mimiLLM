@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -24,6 +25,7 @@ from .tokenizer import (
     ByteTokenizer,
     analyze_tokenizer,
     create_tokenizer,
+    format_qa_text,
     save_tokenizer,
     save_tokenizer_report,
     train_bpe_tokenizer,
@@ -110,7 +112,7 @@ class _TrainingProgress:
             flush=True,
         )
         print(
-            f"{'Batch':>9}  {'Step':>11}  {'Progress':<18}  {'Src':>5}  "
+            f"{'Batch':>9}  {'Step':>11}  {'Progress':<18}  {'Src':>22}  "
             f"{'Phase':>9}  {'Tokens':>6}  {'Loss':>9}  {'Avg loss':>9}  {'Grad':>8}  "
             f"{'Val loss':>9}  {'LR':>9}  {'tok/s':>7}  "
             f"{'Time':>7}  {'Epoch':>8}  {'ETA':>8}",
@@ -231,7 +233,7 @@ class _TrainingProgress:
             batch_time_text = _format_duration(batch_seconds)
         line = (
             f"{batch_text:>9}  {step_text:>11}  {_progress_bar(batch, batches, 16):<18}  "
-            f"{source:>5}  {phase:>9}  {tokens:>6}  {train_text:>9}  {average_text:>9}  "
+            f"{source:>22}  {phase:>9}  {tokens:>6}  {train_text:>9}  {average_text:>9}  "
             f"{gradient_text:>8}  {validation_text:>9}  {learning_rate:>9.3g}  "
             f"{tokens_per_second:>7.1f}  {batch_time_text:>7}  "
             f"{_format_duration(epoch_elapsed):>8}  {_format_duration(eta):>8}"
@@ -283,6 +285,14 @@ def _resolve(base_dir: Path, configured_path: str) -> Path:
     return path.resolve() if path.is_absolute() else (base_dir / path).resolve()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _load_best_validation(path: Path) -> tuple[float, int]:
     try:
         values = json.loads(path.read_text(encoding="utf-8"))
@@ -292,13 +302,54 @@ def _load_best_validation(path: Path) -> tuple[float, int]:
         raise ValueError(f"invalid best-validation metadata: {path}") from exc
     if not math.isfinite(loss) or loss < 0.0 or step < 0:
         raise ValueError(f"invalid best-validation values: {path}")
+    configured_weights = values.get("weights")
+    if configured_weights is None:
+        model_path = path.parent / "model.safetensors"
+    elif isinstance(configured_weights, str) and configured_weights:
+        weights_dir = Path(configured_weights)
+        if not weights_dir.is_absolute():
+            weights_dir = (path.parent / weights_dir).resolve()
+        model_path = weights_dir / "model.safetensors"
+    else:
+        raise ValueError(f"invalid best-validation weights path: {path}")
+    expected_hash = values.get("model_sha256")
+    if expected_hash is not None:
+        if (
+            not isinstance(expected_hash, str)
+            or len(expected_hash) != 64
+            or not model_path.is_file()
+            or _file_sha256(model_path) != expected_hash
+        ):
+            raise ValueError(
+                f"best-validation metadata does not match its model weights: {path}"
+            )
     return loss, step
 
 
-def _save_best_validation(path: Path, loss: float, step: int) -> None:
+def _save_best_validation(
+    path: Path, loss: float, step: int, weights_dir: Path,
+) -> None:
+    model_path = weights_dir / "model.safetensors"
+    if not model_path.is_file():
+        raise FileNotFoundError(
+            f"cannot record best validation without model weights: {model_path}"
+        )
     temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        stored_weights = weights_dir.relative_to(path.parent).as_posix()
+    except ValueError:
+        stored_weights = str(weights_dir)
     with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-        json.dump({"loss": loss, "step": step}, stream, indent=2)
+        json.dump(
+            {
+                "loss": loss,
+                "step": step,
+                "weights": stored_weights,
+                "model_sha256": _file_sha256(model_path),
+            },
+            stream,
+            indent=2,
+        )
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
@@ -333,7 +384,7 @@ def _tokenizer_corpus(config: TransformerConfig, base_dir: Path) -> list[str]:
     if config.text_ratio < 1.0:
         question_train = _resolve(base_dir, config.question_train_path)
         corpus.extend(
-            f"Вопрос: {question.strip()}\nОтвет: {answer.strip()}"
+            format_qa_text(question, answer)
             for question, answer in load_qa_text(question_train)
         )
     if not corpus:
@@ -403,6 +454,7 @@ def _datasets(
         "qa_prompt_weight": config.qa_prompt_weight,
         "qa_answer_prefix_weight": config.qa_answer_prefix_weight,
         "qa_answer_prefix_tokens": config.qa_answer_prefix_tokens,
+        "qa_source_weights": config.qa_source_weights,
     }
     return (
         TokenDataset(question_train, text_paths=text_train, **dataset_options),
@@ -416,22 +468,18 @@ def _batches_per_epoch(dataset: TokenDataset, config: TransformerConfig) -> int:
         return config.batches_per_epoch
 
     estimates: list[int] = []
-    has_questions = bool(dataset.sequences)
-    has_texts = bool(dataset.text_sequences)
-    if has_questions:
-        question_batches = math.ceil(len(dataset.sequences) / config.batch_size)
-        probability = 1.0 - config.text_ratio if has_texts else 1.0
-        if probability > 0.0:
-            estimates.append(math.ceil(question_batches / probability))
-    if has_texts:
-        text_windows = sum(
-            max(1, math.ceil((len(sequence) - 1) / config.context_length))
-            for sequence in dataset.text_sequences
-        )
-        text_batches = math.ceil(text_windows / config.batch_size)
-        probability = config.text_ratio if has_questions else 1.0
-        if probability > 0.0:
-            estimates.append(math.ceil(text_batches / probability))
+    for source, probability in dataset.source_weights():
+        if source == "text":
+            windows = sum(
+                max(1, math.ceil((len(sequence) - 1) / config.context_length))
+                for sequence in dataset.text_sequences
+            )
+            batches = math.ceil(windows / config.batch_size)
+        else:
+            batches = math.ceil(
+                len(dataset.qa_sequences_by_source[source]) / config.batch_size
+            )
+        estimates.append(math.ceil(batches / probability))
     return max(1, *estimates)
 
 
@@ -594,6 +642,13 @@ def train_model(
         flush=True,
     )
     print(
+        "Source mix: " + " | ".join(
+            f"{source}={weight:.1%}"
+            for source, weight in train_data.source_weights()
+        ),
+        flush=True,
+    )
+    print(
         f"Run: {start_step}->{config.steps} steps | epochs={total_epochs} | "
         f"batches/epoch={batches_per_epoch} | batch_size={config.batch_size} | "
         f"backend={backend_name} | {backend_details} | output={destination}",
@@ -713,12 +768,10 @@ def train_model(
             ends_epoch = progress.ends_epoch(step)
             should_validate = (
                 step % config.validation_interval == 0
-                or ends_epoch
                 or step == config.steps
             )
             should_checkpoint = (
                 step % config.checkpoint_interval == 0
-                or ends_epoch
                 or step == config.steps
             )
             if should_validate:
@@ -739,7 +792,7 @@ def train_model(
                 def report_validation(source: str, batch: int, batches: int) -> None:
                     progress.stage(
                         step,
-                        phase=f"val-{source} {batch}/{batches}",
+                        phase=f"val {batch}/{batches}",
                         source=source,
                         tokens=tokens,
                         train_loss=loss_value,
@@ -765,10 +818,16 @@ def train_model(
                 if latest_validation_loss < best_validation_loss:
                     best_validation_loss = latest_validation_loss
                     best_validation_step = step
-                    save_model(destination, model)
+                    best_weights_dir = destination / "best"
+                    save_model(best_weights_dir, model)
                     _save_best_validation(
-                        best_validation_path, best_validation_loss, best_validation_step
+                        best_validation_path,
+                        best_validation_loss,
+                        best_validation_step,
+                        best_weights_dir,
                     )
+                    # Keep the output root directly loadable for existing users.
+                    save_model(destination, model)
                 if latest_validation_loss < (
                     previous_best - config.early_stopping_min_delta
                 ):

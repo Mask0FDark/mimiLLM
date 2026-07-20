@@ -84,6 +84,8 @@ class TransformerTests(unittest.TestCase):
             TransformerConfig(learning_rate_schedule="magic")
         with self.assertRaisesRegex(ValueError, "gradient_clip_norm"):
             TransformerConfig(gradient_clip_norm=0.0)
+        with self.assertRaisesRegex(ValueError, "qa_source_weights"):
+            TransformerConfig(qa_source_weights={"qa.txt": -1.0})
 
     def test_unicode_tokenizer_changes_vocabulary_and_model_shape(self) -> None:
         config = TransformerConfig(

@@ -125,14 +125,28 @@ class DatasetTests(unittest.TestCase):
                 encoding="utf-8",
             )
             dataset = TokenDataset(path)
-            inputs, targets, weights = dataset.sample_batch_with_loss_weights(
-                2, 1000, random.Random(3)
+            inputs, targets, weights = dataset._batch_with_loss_weights(
+                dataset.sequences, "qa", 1000,
             )
             self.assertEqual(len(inputs[0]), len(inputs[1]))
             self.assertEqual(len(targets[0]), len(weights[0]))
-            self.assertIn(0.0, weights[0])
-            self.assertIn(1.0, weights[0])
-            for row_targets, row_weights in zip(targets, weights):
+            for sequence, row_targets, row_weights in zip(
+                dataset.sequences, targets, weights,
+            ):
+                answer_start = dataset.qa_answer_starts[id(sequence)]
+                expected = [
+                    0.0 if target_position < answer_start else 1.0
+                    for target_position in range(1, len(sequence))
+                ]
+                expected.extend([0.0] * (len(row_weights) - len(expected)))
+                self.assertEqual(row_weights, expected)
+                self.assertEqual(row_targets[len(sequence) - 2], dataset.tokenizer.EOS)
+                self.assertEqual(row_weights[len(sequence) - 2], 1.0)
+                first_answer_target = answer_start - 1
+                self.assertEqual(
+                    row_targets[first_answer_target], sequence[answer_start],
+                )
+                self.assertEqual(row_weights[first_answer_target], 1.0)
                 for target, weight in zip(row_targets, row_weights):
                     if target == dataset.tokenizer.PAD:
                         self.assertEqual(weight, 0.0)
@@ -270,6 +284,57 @@ class DatasetTests(unittest.TestCase):
                 sources.add(dataset.last_source)
             self.assertEqual(sources, {"qa", "text"})
             self.assertEqual(dataset.source_weights(), [("qa", 0.5), ("text", 0.5)])
+
+    def test_qa_source_weights_balance_files_and_allow_exclusion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "identity.txt").write_text(
+                "Вопрос: Кто ты?\nОтвет: Я модель.\n", encoding="utf-8",
+            )
+            (root / "facts.txt").write_text(
+                "Вопрос: Столица?\nОтвет: Москва.\n", encoding="utf-8",
+            )
+            (root / "unused.txt").write_text(
+                "Вопрос: Лишнее?\nОтвет: Не выбирать.\n", encoding="utf-8",
+            )
+            dataset = TokenDataset(
+                root,
+                qa_source_weights={
+                    "identity.txt": 3.0,
+                    "facts.txt": 1.0,
+                    "unused.txt": 0.0,
+                },
+            )
+            self.assertEqual(
+                dataset.source_weights(),
+                [("qa:facts.txt", 0.25), ("qa:identity.txt", 0.75)],
+            )
+            self.assertEqual(len(dataset.examples), 2)
+            rng = random.Random(11)
+            counts = {source: 0 for source, _ in dataset.source_weights()}
+            for _ in range(400):
+                dataset.sample_batch_with_loss_weights(1, 32, rng)
+                counts[dataset.last_source] += 1
+            self.assertGreater(counts["qa:identity.txt"], counts["qa:facts.txt"] * 2)
+            for source in counts:
+                self.assertGreater(
+                    len(list(dataset.validation_batches(1, 32, source=source))), 0,
+                )
+
+    def test_qa_source_weights_require_exact_file_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("a.txt", "b.txt"):
+                (root / name).write_text(
+                    "Вопрос: A?\nОтвет: B.\n", encoding="utf-8",
+                )
+            with self.assertRaisesRegex(ValueError, "must list every QA file"):
+                TokenDataset(root, qa_source_weights={"a.txt": 1.0})
+            with self.assertRaisesRegex(ValueError, "unknown files"):
+                TokenDataset(
+                    root,
+                    qa_source_weights={"a.txt": 1.0, "b.txt": 1.0, "c.txt": 1.0},
+                )
 
     def test_text_discovery_is_recursive_and_rejects_empty_corpus(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

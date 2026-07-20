@@ -52,6 +52,7 @@ class TransformerConfig:
     qa_prompt_weight: float = 0.0
     qa_answer_prefix_weight: float = 1.0
     qa_answer_prefix_tokens: int = 0
+    qa_source_weights: dict[str, float] | None = None
     text_train_path: str = "data/text/train"
     text_validation_path: str = "data/text/validation"
     question_train_path: str = "data/question/train"
@@ -135,6 +136,25 @@ class TransformerConfig:
             or self.qa_answer_prefix_tokens < 0
         ):
             raise ValueError("qa_answer_prefix_tokens must be a non-negative integer")
+        if self.qa_source_weights is not None:
+            if not isinstance(self.qa_source_weights, dict) or not self.qa_source_weights:
+                raise ValueError("qa_source_weights must be a non-empty object or null")
+            positive = False
+            for key, weight in self.qa_source_weights.items():
+                if not isinstance(key, str) or not key.strip():
+                    raise ValueError("qa_source_weights keys must be non-empty strings")
+                if (
+                    not isinstance(weight, (int, float))
+                    or isinstance(weight, bool)
+                    or not math.isfinite(weight)
+                    or weight < 0.0
+                ):
+                    raise ValueError(
+                        f"qa_source_weights[{key!r}] must be finite and non-negative"
+                    )
+                positive = positive or weight > 0.0
+            if not positive:
+                raise ValueError("qa_source_weights needs at least one positive weight")
         if self.warmup_steps < 0 or self.validation_interval <= 0 or self.checkpoint_interval <= 0:
             raise ValueError("интервалы должны быть положительными, warmup_steps >= 0")
         if not isinstance(self.save_validation_checkpoints, bool):

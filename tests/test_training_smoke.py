@@ -1,5 +1,6 @@
 """Короткий полный шаг обучения и продолжение из checkpoint."""
 
+import hashlib
 import os
 import json
 import tempfile
@@ -90,11 +91,34 @@ class TrainingSmokeTests(unittest.TestCase):
             self.assertTrue((result.weights_dir / "model.safetensors").is_file())
             self.assertTrue((result.weights_dir / "last" / "model.safetensors").is_file())
             self.assertTrue((result.weights_dir / "best_validation.json").is_file())
+            metadata = json.loads(
+                (result.weights_dir / "best_validation.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+            self.assertEqual(metadata["weights"], "best")
+            best_weights = result.weights_dir / metadata["weights"]
+            self.assertTrue((best_weights / "model.safetensors").is_file())
+            self.assertEqual(
+                metadata["model_sha256"],
+                hashlib.sha256(
+                    (best_weights / "model.safetensors").read_bytes()
+                ).hexdigest(),
+            )
             validation_snapshot = result.weights_dir / "validation" / "step_00000001"
             self.assertTrue((validation_snapshot / "model.safetensors").is_file())
             self.assertTrue((validation_snapshot / "validation.json").is_file())
             self.assertTrue(result.checkpoint_path.is_file())
             self.assertEqual(restored.config, config)
+
+            best_model = best_weights / "model.safetensors"
+            best_model.write_bytes(best_model.read_bytes() + b"corrupt")
+            with self.assertRaisesRegex(ValueError, "does not match its model weights"):
+                train_from_config(
+                    config_path,
+                    resume=result.checkpoint_path,
+                    steps=2,
+                )
 
     def test_bpe_training_exports_tokenizer_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -236,6 +260,33 @@ class TrainingSmokeTests(unittest.TestCase):
             config_path = root / "config.json"
             config_path.write_text(json.dumps(config.to_dict()), encoding="utf-8")
             result = train_from_config(config_path, output_dir=root / "weights")
+            self.assertEqual(result.step, 3)
+
+    def test_display_epoch_does_not_trigger_validation_or_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for split in ("train", "validation"):
+                destination = root / "question" / split
+                destination.mkdir(parents=True)
+                (destination / "qa.txt").write_text(
+                    "Вопрос: A?\nОтвет: B.\n", encoding="utf-8",
+                )
+            config = TransformerConfig(
+                context_length=8, d_model=4, n_layers=1, n_heads=1, d_mlp=8,
+                batch_size=1, batches_per_epoch=1, steps=3,
+                learning_rate=1e-4, weight_decay=0.0, warmup_steps=0,
+                validation_interval=3, checkpoint_interval=3,
+                save_validation_checkpoints=True, text_ratio=0.0,
+                question_train_path="question/train",
+                question_validation_path="question/validation",
+            )
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config.to_dict()), encoding="utf-8")
+            result = train_from_config(config_path, output_dir=root / "weights")
+            snapshots = sorted(
+                path.name for path in (result.weights_dir / "validation").iterdir()
+            )
+            self.assertEqual(snapshots, ["step_00000003"])
             self.assertEqual(result.step, 3)
 
 

@@ -1,5 +1,57 @@
 # Changelog / История изменений
 
+## 0.10.1 — 2026-07-20
+
+### English
+
+- Generation gates can now require a minimum response length, a minimum number of Cyrillic characters, and a maximum repeated-word fraction. This catches collapsed outputs such as repeated role labels, separators, or one token repeated to the context limit even when validation loss is still decreasing.
+- Added `mimillm-check-sft`, a reproducible one-pair SFT acceptance check. It records the exact prompt, input, target, loss-weight and EOS arrays, verifies that loss falls, requires the expected greedy answer, and repeats generation after loading the saved model in a fresh process.
+- QA training, tokenizer-corpus construction and inference now share one formatter, preventing subtle differences between the prompt used for SFT and the prompt used for generation.
+- Validation-best weights are saved to a dedicated `best/` artifact before an atomic metadata pointer is updated. The pointer includes the model SHA-256 and is verified on resume, while the output root remains directly loadable.
+- Pipeline lineage now records SHA-256 hashes of the exact parent model, config and tokenizer. A stage interrupted before its first checkpoint can restart safely instead of failing merely because its output directory contains lineage metadata.
+- Added `tools/memory_regression.py` for a repeated tiny train/validation/generation/checkpoint workload with sampled RSS and an explicit leak threshold.
+
+### Русский
+
+- Проверки генерации теперь умеют требовать минимальную длину ответа, минимальное число кириллических символов и ограничивать долю самого часто повторяющегося слова. Это отсеивает схлопнувшиеся ответы из повторяющихся меток ролей, разделителей или одного токена, даже если validation loss продолжает снижаться.
+- Добавлена команда `mimillm-check-sft` для воспроизводимой проверки SFT на одной паре. Она сохраняет точные массивы prompt, input, target, весов loss и EOS, проверяет падение loss, ожидаемый greedy-ответ и повторяет генерацию после загрузки весов в новом процессе.
+- Обучение QA, подготовка корпуса токенизатора и генерация теперь используют одну функцию форматирования, поэтому prompt для SFT не может незаметно отличаться от prompt при использовании модели.
+- Лучшие по validation веса сначала сохраняются в отдельный каталог `best/`, после чего атомарно обновляется метадата-указатель с SHA-256 модели. При продолжении хеш проверяется, а корневая папка весов остаётся напрямую загружаемой.
+- Lineage этапа теперь содержит SHA-256 точных родительских весов, конфигурации и токенизатора. Если процесс остановился до первого checkpoint, этап безопасно начинается заново вместо ошибки из-за уже созданной служебной папки.
+- Добавлен `tools/memory_regression.py`: повторяемый короткий цикл train/validation/generation/checkpoint с замерами RSS и явным порогом утечки памяти.
+
+## 0.10.0 — 2026-07-17
+
+### English
+
+- Added `qa_source_weights` for explicit per-file sampling probabilities during SFT. Small identity or dialogue sets can now be protected from being drowned out by a much larger fact dataset; a zero weight excludes a source from a stage without changing the corpus on disk.
+- Training and validation use the same normalized source mixture, the effective probabilities are printed before training, and configuration validation requires every discovered QA file to be listed.
+- Added top-level pipeline `initial_weights`, allowing a checked SFT curriculum to start from an existing compatible pretrained model with a fresh optimizer and learning-rate schedule.
+- `pipeline_state.json` is now switched to the current stage before training begins, so status monitors cannot keep showing a stale result from an earlier curriculum while a new stage is running.
+- Generation gates now compare the lowest-validation-loss weights with the final-step weights. If the final weights pass more held-out scenarios, they become the stage deployment weights while the loss-best model is preserved in `best_validation/`; both reports are stored in `generation_candidates.json`.
+
+### Русский
+
+- Добавлен `qa_source_weights` для явных вероятностей выбора каждого QA-файла во время SFT. Маленький набор идентичности или диалогов больше не теряется на фоне значительно большей базы фактов; нулевой вес исключает источник только из этапа, не удаляя его с диска.
+- Обучение и validation используют одну нормализованную смесь источников, итоговые вероятности печатаются перед запуском, а проверка конфигурации требует перечислить каждый найденный QA-файл.
+- Добавлено поле pipeline `initial_weights`: проверенную цепочку SFT теперь можно начать с существующих совместимых pretrained-весов, создав новый optimizer и новое расписание learning rate.
+- `pipeline_state.json` теперь переключается на текущий этап до начала обучения, поэтому мониторинг не показывает устаревший результат прежней цепочки, пока уже работает новый этап.
+- Проверка генерации теперь сравнивает веса с минимальным validation loss и веса последнего шага. Если последние веса проходят больше независимых сценариев, они становятся основными весами этапа, а лучшая по loss модель сохраняется в `best_validation/`; оба отчёта записываются в `generation_candidates.json`.
+
+## 0.9.1 — 2026-07-16
+
+### English
+
+- Fixed validation and checkpoint scheduling: display-epoch boundaries no longer trigger extra evaluations or consume early-stopping patience. Evaluations now run strictly at `validation_interval` and the final step; checkpoints follow `checkpoint_interval` and the final step.
+- Added the optional per-stage `max_validation_loss` gate, so a weak pretraining stage cannot silently initialize supervised fine-tuning.
+- Added the public `PipelineQualityError`. Pipeline command-line failures now report a concise quality-gate message without an internal Python traceback.
+
+### Русский
+
+- Исправлено расписание validation и checkpoint: границы отображаемых эпох больше не запускают лишние проверки и не расходуют patience ранней остановки. Validation теперь выполняется строго по `validation_interval` и на последнем шаге, checkpoint — по `checkpoint_interval` и на последнем шаге.
+- Добавлен необязательный порог `max_validation_loss` для каждого этапа, чтобы слабое предварительное обучение не могло незаметно перейти в SFT.
+- Добавлено публичное исключение `PipelineQualityError`. Команда pipeline теперь сообщает о провале проверки качества коротко, без внутреннего Python traceback.
+
 ## 0.9.0 — 2026-07-16
 
 ### English

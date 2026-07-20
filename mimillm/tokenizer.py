@@ -108,6 +108,23 @@ def pretokenize(text: str, *, mode: str = "unicode_words_v1") -> list[str]:
     raise ValueError("BPE pretokenizer must be 'unicode_words_v1' or 'legacy_whitespace'")
 
 
+def format_qa_text(question: str, answer: str | None = None) -> str:
+    """Build the canonical QA text shared by training and inference.
+
+    ``answer=None`` returns the exact generation prompt. A completed training
+    example adds one separating space and the stripped assistant answer. Keeping
+    this formatting in one function prevents a silent train/inference mismatch.
+    """
+    if not isinstance(question, str):
+        raise TypeError("question must be a string")
+    prompt = f"Вопрос: {question.strip()}\nОтвет:"
+    if answer is None:
+        return prompt
+    if not isinstance(answer, str):
+        raise TypeError("answer must be a string or None")
+    return f"{prompt} {answer.strip()}"
+
+
 class ByteTokenizer:
     """Кодирует текст байтами UTF-8 и четырьмя специальными токенами."""
 
@@ -161,16 +178,11 @@ class ByteTokenizer:
 
     def encode_qa(self, question: str, answer: str) -> list[int]:
         """Кодирует законченную обучающую пару вопрос–ответ."""
-        if not isinstance(question, str) or not isinstance(answer, str):
-            raise TypeError("question и answer должны быть строками")
-        text = f"Вопрос: {question.strip()}\nОтвет: {answer.strip()}"
-        return [self.BOS, *self.encode(text), self.EOS]
+        return [self.BOS, *self.encode(format_qa_text(question, answer)), self.EOS]
 
     def encode_prompt(self, question: str) -> list[int]:
         """Кодирует начало ответа для авторегрессионной генерации."""
-        if not isinstance(question, str):
-            raise TypeError("question должен быть строкой")
-        return [self.BOS, *self.encode(f"Вопрос: {question.strip()}\nОтвет:")]
+        return [self.BOS, *self.encode(format_qa_text(question))]
 
 
 class UnicodeByteTokenizer(ByteTokenizer):

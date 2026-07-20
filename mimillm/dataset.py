@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import random
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from .tokenizer import ByteTokenizer
@@ -119,6 +119,70 @@ def load_qa_text(path: str | Path) -> list[tuple[str, str]]:
     return result
 
 
+def _load_question_file(path: Path) -> list[tuple[str, str]]:
+    return _dialogue_examples(path) if path.suffix.lower() == ".jsonl" else _load_qa_blocks(path)
+
+
+def _question_source_key(root: Path, path: Path) -> str:
+    """Returns a stable forward-slash key for one configured QA file."""
+    return path.name if root.is_file() else path.relative_to(root).as_posix()
+
+
+def _validated_question_source_weights(
+    root: Path,
+    files: list[Path],
+    configured: Mapping[str, float],
+) -> dict[str, float]:
+    """Validates an exact, reproducible mapping from relative QA files to weights."""
+    normalized: dict[str, float] = {}
+    original_keys: dict[str, str] = {}
+    for raw_key, raw_weight in configured.items():
+        if not isinstance(raw_key, str) or not raw_key.strip():
+            raise ValueError("qa_source_weights keys must be non-empty strings")
+        key = raw_key.strip().replace("\\", "/")
+        parts = Path(key).parts
+        if Path(key).is_absolute() or key.startswith("/") or ".." in parts:
+            raise ValueError(
+                f"qa_source_weights key must be relative to the question directory: {raw_key!r}"
+            )
+        folded = key.casefold()
+        if folded in normalized:
+            raise ValueError(f"duplicate qa_source_weights key: {raw_key!r}")
+        if (
+            not isinstance(raw_weight, (int, float))
+            or isinstance(raw_weight, bool)
+            or not math.isfinite(raw_weight)
+            or raw_weight < 0.0
+        ):
+            raise ValueError(
+                f"qa_source_weights[{raw_key!r}] must be a finite non-negative number"
+            )
+        normalized[folded] = float(raw_weight)
+        original_keys[folded] = key
+
+    discovered = {
+        _question_source_key(root, path).casefold(): _question_source_key(root, path)
+        for path in files
+    }
+    missing = sorted(discovered[key] for key in set(discovered) - set(normalized))
+    unknown = sorted(original_keys[key] for key in set(normalized) - set(discovered))
+    if missing or unknown:
+        details: list[str] = []
+        if missing:
+            details.append(f"missing files: {missing}")
+        if unknown:
+            details.append(f"unknown files: {unknown}")
+        raise ValueError("qa_source_weights must list every QA file; " + "; ".join(details))
+    total = sum(normalized.values())
+    if total <= 0.0:
+        raise ValueError("qa_source_weights must contain at least one positive weight")
+    return {
+        discovered[key]: normalized[key] / total
+        for key in sorted(discovered)
+        if normalized[key] > 0.0
+    }
+
+
 def discover_text_files(paths: Iterable[str | Path] | str | Path) -> list[Path]:
     """Находит поддерживаемые текстовые файлы, сохраняя стабильный порядок."""
     requested = [paths] if isinstance(paths, (str, Path)) else list(paths)
@@ -171,6 +235,7 @@ class TokenDataset:
         qa_prompt_weight: float = 0.0,
         qa_answer_prefix_weight: float = 1.0,
         qa_answer_prefix_tokens: int = 0,
+        qa_source_weights: Mapping[str, float] | None = None,
     ) -> None:
         if not 0.0 <= text_ratio <= 1.0:
             raise ValueError("text_ratio должен быть от 0 до 1")
@@ -200,10 +265,52 @@ class TokenDataset:
         self.qa_prompt_weight = float(qa_prompt_weight)
         self.qa_answer_prefix_weight = float(qa_answer_prefix_weight)
         self.qa_answer_prefix_tokens = qa_answer_prefix_tokens
-        self.examples = load_qa_text(self.path) if self.path is not None else []
+        self.qa_sequences_by_source: dict[str, list[list[int]]] = {}
+        self.qa_examples_by_source: dict[str, list[tuple[str, str]]] = {}
+        self.qa_source_weights: dict[str, float] = {}
+        if self.path is None:
+            if qa_source_weights is not None:
+                raise ValueError("qa_source_weights requires a question dataset path")
+        else:
+            files = discover_question_files(self.path)
+            if qa_source_weights is None:
+                source_files = {"qa": files}
+                self.qa_source_weights = {"qa": 1.0}
+            else:
+                file_weights = _validated_question_source_weights(
+                    self.path, files, qa_source_weights,
+                )
+                source_files = {
+                    f"qa:{key}": [path]
+                    for key, weight in file_weights.items()
+                    for path in files
+                    if _question_source_key(self.path, path) == key and weight > 0.0
+                }
+                self.qa_source_weights = {
+                    f"qa:{key}": weight for key, weight in file_weights.items()
+                }
+            for source, source_paths in source_files.items():
+                examples = [
+                    example
+                    for source_path in source_paths
+                    for example in _load_question_file(source_path)
+                ]
+                if not examples:
+                    raise ValueError(f"QA source {source!r} is empty")
+                self.qa_examples_by_source[source] = examples
+                self.qa_sequences_by_source[source] = [
+                    self.tokenizer.encode_qa(question, answer)
+                    for question, answer in examples
+                ]
+        self.examples = [
+            example
+            for source in self.qa_examples_by_source
+            for example in self.qa_examples_by_source[source]
+        ]
         self.sequences = [
-            self.tokenizer.encode_qa(question, answer)
-            for question, answer in self.examples
+            sequence
+            for source in self.qa_sequences_by_source
+            for sequence in self.qa_sequences_by_source[source]
         ]
         self.qa_answer_starts = {
             id(sequence): len(self.tokenizer.encode_prompt(question))
@@ -221,27 +328,37 @@ class TokenDataset:
             raise ValueError("в датасете недостаточно токенов")
         if any(len(sequence) < 2 for sequence in [*self.sequences, *self.text_sequences]):
             raise ValueError("пример датасета слишком короткий")
-        self.last_source = "qa" if self.sequences else "text"
+        self.last_source = next(iter(self.qa_source_weights), "text")
 
     def source_weights(self) -> list[tuple[str, float]]:
         """Возвращает фактические вероятности источников с учётом их наличия."""
         if self.text_sequences and self.sequences:
-            weights = [("qa", 1.0 - self.text_ratio), ("text", self.text_ratio)]
+            weights = [
+                (source, (1.0 - self.text_ratio) * weight)
+                for source, weight in self.qa_source_weights.items()
+            ]
+            if self.text_ratio > 0.0:
+                weights.append(("text", self.text_ratio))
             return [(source, weight) for source, weight in weights if weight > 0.0]
         if self.text_sequences:
             return [("text", 1.0)]
-        return [("qa", 1.0)]
+        return list(self.qa_source_weights.items())
 
     def _choose_source(self, rng: random.Random) -> str:
         weights = self.source_weights()
         if len(weights) == 1:
             return weights[0][0]
-        return "text" if rng.random() < self.text_ratio else "qa"
+        names, probabilities = zip(*weights)
+        return rng.choices(names, weights=probabilities, k=1)[0]
 
     def _choose_sequences(
         self, source: str, batch_size: int, context_length: int, rng: random.Random,
     ) -> list[list[int]]:
-        sequences = self.text_sequences if source == "text" else self.sequences
+        sequences = (
+            self.text_sequences
+            if source == "text"
+            else self.qa_sequences_by_source[source]
+        )
         if source == "text":
             # Большие документы содержат больше разных окон и должны встречаться чаще.
             weights = [max(1, len(sequence) - context_length) for sequence in sequences]
@@ -263,7 +380,7 @@ class TokenDataset:
         for sequence in selected:
             maximum_start = len(sequence) - window_size
             # QA чаще начинается с вопроса; у длинного текста равномерно изучаются все участки.
-            prefix_probability = 0.7 if source == "qa" else 0.1
+            prefix_probability = 0.7 if source != "text" else 0.1
             start = (
                 0 if maximum_start == 0 or rng.random() < prefix_probability
                 else rng.randint(1, maximum_start)
@@ -308,7 +425,7 @@ class TokenDataset:
         for index, sequence in enumerate(selected):
             actual_size = min(window_size, len(sequence))
             maximum_start = len(sequence) - actual_size
-            if source == "qa":
+            if source != "text":
                 answer_start = self.qa_answer_starts[id(sequence)]
                 earliest_answer_window = max(0, answer_start - actual_size + 1)
                 if rng is None:
@@ -332,7 +449,7 @@ class TokenDataset:
             window = sequence[start:start + actual_size]
             row_inputs = window[:-1]
             row_targets = window[1:]
-            if source == "qa":
+            if source != "text":
                 row_weights = [
                     self._qa_loss_weight(absolute_position, answer_start)
                     for absolute_position in range(start + 1, start + actual_size)
@@ -368,7 +485,11 @@ class TokenDataset:
         selected_source = source or self.source_weights()[0][0]
         if selected_source not in {name for name, _ in self.source_weights()}:
             raise ValueError(f"источник {selected_source!r} отсутствует или имеет нулевой вес")
-        sequences = self.text_sequences if selected_source == "text" else self.sequences
+        sequences = (
+            self.text_sequences
+            if selected_source == "text"
+            else self.qa_sequences_by_source[selected_source]
+        )
         selected = [sequences[(offset + index) % len(sequences)] for index in range(batch_size)]
         window_size = min(context_length + 1, *(len(sequence) for sequence in selected))
         inputs, targets = [], []
@@ -390,7 +511,11 @@ class TokenDataset:
         selected_source = source or self.source_weights()[0][0]
         if selected_source not in {name for name, _ in self.source_weights()}:
             raise ValueError(f"источник {selected_source!r} отсутствует или имеет нулевой вес")
-        sequences = self.text_sequences if selected_source == "text" else self.sequences
+        sequences = (
+            self.text_sequences
+            if selected_source == "text"
+            else self.qa_sequences_by_source[selected_source]
+        )
         selected = [sequences[(offset + index) % len(sequences)] for index in range(batch_size)]
         return self._batch_with_loss_weights(
             selected, selected_source, context_length, offset=offset,
@@ -404,7 +529,11 @@ class TokenDataset:
             raise ValueError("batch_size и context_length должны быть положительными")
         if source not in {name for name, _ in self.source_weights()}:
             raise ValueError(f"источник {source!r} отсутствует или имеет нулевой вес")
-        sequences = self.text_sequences if source == "text" else self.sequences
+        sequences = (
+            self.text_sequences
+            if source == "text"
+            else self.qa_sequences_by_source[source]
+        )
         pending: list[tuple[list[int], list[int], list[float]]] = []
         for sequence in sequences:
             answer_start = 0 if source == "text" else self.qa_answer_starts[id(sequence)]
@@ -446,7 +575,11 @@ class TokenDataset:
             raise ValueError("batch_size и context_length должны быть положительными")
         if source not in {name for name, _ in self.source_weights()}:
             raise ValueError(f"источник {source!r} отсутствует или имеет нулевой вес")
-        sequences = self.text_sequences if source == "text" else self.sequences
+        sequences = (
+            self.text_sequences
+            if source == "text"
+            else self.qa_sequences_by_source[source]
+        )
         rows = 0
         for sequence in sequences:
             answer_start = 0 if source == "text" else self.qa_answer_starts[id(sequence)]

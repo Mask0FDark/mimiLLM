@@ -18,6 +18,11 @@ from .dataset import (
     load_qa_text,
     load_text_documents,
 )
+from .diagnostics import (
+    DEFAULT_ANSWER,
+    DEFAULT_QUESTION,
+    run_one_pair_sft_acceptance,
+)
 from .generation import (
     answer_question, generate, generate_response, generate_text, sample_token,
 )
@@ -39,7 +44,7 @@ from .losses import cross_entropy
 from .module import Module
 from .optim import AdamW, Optimizer, SGD
 from .parameter import Parameter
-from .pipeline import PipelineResult, PipelineStage, train_pipeline
+from .pipeline import PipelineQualityError, PipelineResult, PipelineStage, train_pipeline
 from .safetensors import load_safetensors, save_safetensors
 from .tensor import Tensor, is_grad_enabled, no_grad
 from .tokenizer import (
@@ -50,6 +55,7 @@ from .tokenizer import (
     analyze_tokenizer,
     create_tokenizer,
     detokenize,
+    format_qa_text,
     load_tokenizer,
     pretokenize,
     save_tokenizer,
@@ -75,6 +81,8 @@ __all__ = [
     "CudaBackend",
     "DecoderTransformer",
     "DatasetAuditReport",
+    "DEFAULT_ANSWER",
+    "DEFAULT_QUESTION",
     "DialogueCheckResult",
     "DialogueEvaluationReport",
     "Embedding",
@@ -89,6 +97,7 @@ __all__ = [
     "Optimizer",
     "Parameter",
     "PipelineResult",
+    "PipelineQualityError",
     "PipelineStage",
     "RMSNorm",
     "ReLU",
@@ -111,6 +120,7 @@ __all__ = [
     "discover_text_files",
     "detokenize",
     "evaluate_dialogues",
+    "format_qa_text",
     "generate",
     "generate_response",
     "generate_text",
@@ -129,6 +139,7 @@ __all__ = [
     "normalize_training_text",
     "pretokenize",
     "reset_backend",
+    "run_one_pair_sft_acceptance",
     "sample_token",
     "save_checkpoint",
     "save_dataset_audit",
@@ -146,4 +157,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.9.0"
+__version__ = "0.10.1"

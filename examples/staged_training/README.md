@@ -25,6 +25,11 @@ model-quality experiment.
 its cases with prompts that do not occur in training. The tiny bundled model is
 not expected to pass it.
 
+The pretraining stage also demonstrates `max_validation_loss`. If its best
+validation loss remains above this limit, the pipeline stops before SFT. The
+limit must be chosen from a baseline for the same tokenizer and dataset; it is
+not a universal model-quality score.
+
 Встроенный набор данных намеренно мал и подходит только для проверки механики.
 Перед экспериментом с качеством модели замените данные во всех четырёх
 каталогах.
@@ -33,3 +38,18 @@ not expected to pass it.
 сценариев на отсутствующие в train добавьте
 `"evaluation": "dialogue_eval.json"` в этап `dialogue`. Встроенная крошечная
 модель проходить эту проверку не обязана.
+
+Этап предварительного обучения также показывает `max_validation_loss`. Если
+его лучший validation loss остаётся выше порога, pipeline останавливается до
+SFT. Порог нужно выбирать по базовому запуску с тем же токенизатором и набором
+данных: универсальной оценкой качества модели он не является.
+
+For a later follow-up curriculum, an already validated model directory can be
+set as top-level `initial_weights`; the first listed stage may then be SFT. The
+pipeline verifies architecture and tokenizer compatibility and resets the
+optimizer and learning-rate schedule.
+
+Для следующей цепочки уже проверенный каталог модели можно указать в
+верхнеуровневом `initial_weights`; тогда первым этапом в списке может быть SFT.
+Pipeline проверит совместимость архитектуры и токенизатора и начнёт с нового
+optimizer и нового расписания learning rate.

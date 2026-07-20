@@ -90,6 +90,75 @@ class DialogueEvaluationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "top_k"):
                 evaluate_dialogues(type("Model", (), {})(), path)
 
+    def test_response_shape_checks_reject_degenerate_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "shape_eval.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "min_pass_rate": 1.0,
+                        "cases": [{
+                            "name": "natural-answer",
+                            "messages": [
+                                {"role": "user", "content": "Привет!"},
+                                {
+                                    "role": "assistant",
+                                    "min_characters": 12,
+                                    "min_cyrillic_characters": 12,
+                                    "max_repeated_word_fraction": 0.5,
+                                },
+                            ],
+                        }],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            model = type("Model", (), {"tokenizer": object()})()
+            with patch(
+                "mimillm.evaluation.answer_question",
+                return_value="Ответ: Ответ: ------------------------",
+            ):
+                report = evaluate_dialogues(model, path)
+            self.assertFalse(report.ok)
+            self.assertIn("Cyrillic", " ".join(report.results[0].failures))
+            self.assertIn("most frequent word", " ".join(report.results[0].failures))
+
+    def test_response_shape_checks_accept_normal_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "shape_eval.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "cases": [{
+                            "name": "natural-answer",
+                            "messages": [
+                                {"role": "user", "content": "Привет!"},
+                                {
+                                    "role": "assistant",
+                                    "min_characters": 12,
+                                    "min_cyrillic_characters": 12,
+                                    "max_repeated_word_fraction": 0.5,
+                                },
+                            ],
+                        }],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            model = type("Model", (), {"tokenizer": object()})()
+            with patch(
+                "mimillm.evaluation.answer_question",
+                return_value="Привет! Рад с тобой познакомиться.",
+            ):
+                report = evaluate_dialogues(model, path)
+            self.assertTrue(report.ok)
+
 
 if __name__ == "__main__":
     unittest.main()

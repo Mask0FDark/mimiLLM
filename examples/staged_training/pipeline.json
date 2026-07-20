@@ -20,7 +20,8 @@
       "name": "language",
       "kind": "pretrain",
       "config": "pretrain.json",
-      "output_dir": "weights/language"
+      "output_dir": "weights/language",
+      "max_validation_loss": 7.0
     },
     {
       "name": "dialogue",

@@ -30,7 +30,7 @@ class PublicApiTests(unittest.TestCase):
             mimillm.create_model(mimillm.ModelConfig(), d_model=8)
 
     def test_version_and_exports(self) -> None:
-        self.assertEqual(mimillm.__version__, "0.9.0")
+        self.assertEqual(mimillm.__version__, "0.10.1")
         for name in (
             "Tensor", "AdamW", "TokenDataset", "create_model", "load_model",
             "save_model", "train_from_config", "CudaBackend", "cuda_is_available",
@@ -39,8 +39,10 @@ class PublicApiTests(unittest.TestCase):
             "load_tokenizer", "save_tokenizer", "tokenize", "detokenize",
             "pretokenize", "TokenizerReport", "analyze_tokenizer",
             "DatasetAuditReport", "audit_dataset", "PipelineResult",
-            "train_pipeline", "DialogueEvaluationReport", "evaluate_dialogues",
+            "train_pipeline", "PipelineQualityError", "DialogueEvaluationReport",
+            "evaluate_dialogues",
             "save_dialogue_evaluation",
+            "run_one_pair_sft_acceptance",
             "HailoRuntimeInfo", "HailoHefInfo", "hailo_is_available",
             "inspect_hailo_runtime", "inspect_hailo_hef",
         ):

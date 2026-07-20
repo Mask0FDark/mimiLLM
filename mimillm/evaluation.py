@@ -16,6 +16,8 @@ from .transformer import DecoderTransformer
 
 
 _SPACE = re.compile(r"\s+")
+_WORD = re.compile(r"[\wЁёА-Яа-я]+", re.UNICODE)
+_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 
 
 def _normalize(text: str) -> str:
@@ -64,7 +66,11 @@ def _dialogue_question(history: list[tuple[str, str]], question: str) -> str:
 
 
 def _expectation_failures(expectation: dict[str, Any], response: str) -> list[str]:
-    allowed = {"role", "exact", "contains_all", "contains_any", "forbidden"}
+    allowed = {
+        "role", "exact", "contains_all", "contains_any", "forbidden",
+        "min_characters", "min_cyrillic_characters",
+        "max_repeated_word_fraction",
+    }
     unknown = sorted(set(expectation) - allowed)
     if unknown:
         raise ValueError(f"assistant expectation has unknown fields: {unknown}")
@@ -100,6 +106,48 @@ def _expectation_failures(expectation: dict[str, Any], response: str) -> list[st
         failures.append("response contains an invalid UTF-8 replacement character")
     if not response.strip():
         failures.append("response is empty")
+    min_characters = expectation.get("min_characters")
+    min_cyrillic = expectation.get("min_cyrillic_characters")
+    max_repeated = expectation.get("max_repeated_word_fraction")
+    for name, value in (
+        ("min_characters", min_characters),
+        ("min_cyrillic_characters", min_cyrillic),
+    ):
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+        ):
+            raise TypeError(f"assistant {name} expectation must be a non-negative integer")
+    if max_repeated is not None and (
+        not isinstance(max_repeated, (int, float))
+        or isinstance(max_repeated, bool)
+        or not math.isfinite(max_repeated)
+        or not 0.0 <= max_repeated <= 1.0
+    ):
+        raise TypeError(
+            "assistant max_repeated_word_fraction expectation must be between 0 and 1"
+        )
+    if min_characters is not None and len(response.strip()) < min_characters:
+        failures.append(
+            f"response has fewer than {min_characters} non-padding characters"
+        )
+    cyrillic_characters = len(_CYRILLIC.findall(response))
+    if min_cyrillic is not None and cyrillic_characters < min_cyrillic:
+        failures.append(
+            f"response has {cyrillic_characters} Cyrillic characters; "
+            f"required at least {min_cyrillic}"
+        )
+    if max_repeated is not None:
+        words = [_normalize(word) for word in _WORD.findall(response)]
+        if not words:
+            failures.append("response contains no words for repetition check")
+        else:
+            largest_count = max(words.count(word) for word in set(words))
+            repeated_fraction = largest_count / len(words)
+            if repeated_fraction > max_repeated:
+                failures.append(
+                    f"most frequent word occupies {repeated_fraction:.1%} of the "
+                    f"response; allowed at most {max_repeated:.1%}"
+                )
     return failures
 
 
