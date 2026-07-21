@@ -176,6 +176,30 @@ class PipelineTests(unittest.TestCase):
             )
             self.assertEqual(resumed_lineage["effective_config"]["steps"], 2)
 
+            with self.assertRaisesRegex(FileExistsError, "archive or move"):
+                train_pipeline(
+                    root / "pipeline.json", backend="python",
+                    restart_stage="dialogue",
+                )
+            dialogue_output = root / "weights" / "dialogue"
+            dialogue_output.rename(root / "weights" / "dialogue_archived")
+            restarted = train_pipeline(
+                root / "pipeline.json", backend="python",
+                restart_stage="dialogue",
+            )
+            self.assertEqual(restarted.stages[-1].step, 2)
+            restarted_lineage = json.loads(
+                (dialogue_output / "lineage.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(restarted_lineage["status"], "complete")
+            self.assertEqual(restarted_lineage["parent_stage"], "language")
+
+            with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+                train_pipeline(
+                    root / "pipeline.json", backend="python",
+                    resume_stage="dialogue", restart_stage="dialogue",
+                )
+
     def test_sft_from_scratch_is_rejected_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

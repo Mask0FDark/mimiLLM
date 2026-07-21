@@ -1,5 +1,21 @@
 # Changelog / История изменений
 
+## 0.10.4 — 2026-07-21
+
+### English
+
+- Added `restart_stage` and the `--restart-stage` pipeline option for rerunning
+  a failed stage from its verified completed parent after changing stage data
+  or immutable settings. Restarting refuses to overwrite a non-empty output
+  directory and does not reuse the failed optimizer state.
+
+### Русский
+
+- Добавлены `restart_stage` и параметр pipeline `--restart-stage` для повторного
+  запуска неудачного этапа от проверенных весов завершённого родителя после
+  изменения данных или неизменяемых настроек. Перезапуск не перезаписывает
+  непустой каталог и не использует состояние optimizer неудачного этапа.
+
 ## 0.10.3 — 2026-07-21
 
 ### English

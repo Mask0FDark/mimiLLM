@@ -393,6 +393,18 @@ validation-точку с лучшей и потребует снижения los
 python train_pipeline.py pipeline.json --backend cuda --resume-stage dialogue
 ```
 
+Если этап завершился, но не прошёл quality gate, а вы изменили его данные или
+неизменяемые настройки, сначала переместите старый каталог весов в архив. Затем
+запустите этап заново от проверенных весов предыдущего этапа:
+
+```powershell
+python train_pipeline.py pipeline.json --backend cuda --restart-stage dialogue
+```
+
+`--restart-stage` не загружает старый optimizer checkpoint и не перезаписывает
+непустой каталог. Все предыдущие этапы должны иметь `lineage.json` со статусом
+`complete`; их лучшие веса автоматически становятся родительскими.
+
 При продолжении можно увеличить `steps` и изменить частоту validation/checkpoint. Изменение архитектуры, данных или токенизатора будет отклонено.
 
 ### Обучение одного этапа вручную
@@ -759,6 +771,19 @@ without an internal traceback.
 ```bash
 mimillm-train-pipeline pipeline.json --backend auto --resume-stage dialogue
 ```
+
+Use `--resume-stage` for an interrupted stage whose checkpoint and immutable
+inputs are unchanged. If a completed stage failed a quality gate and its data
+or immutable settings have changed, archive its old output directory and start
+it again from the verified completed parent:
+
+```bash
+mimillm-train-pipeline pipeline.json --backend auto --restart-stage dialogue
+```
+
+`--restart-stage` refuses to overwrite a non-empty directory and never loads
+the failed stage's optimizer state. The preceding stages must have complete
+lineage metadata; their selected weights are connected automatically.
 
 The lower-level one-stage API remains available:
 

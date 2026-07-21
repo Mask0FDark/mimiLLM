@@ -800,6 +800,7 @@ def train_pipeline(
     *,
     backend: str | None = None,
     resume_stage: str | None = None,
+    restart_stage: str | None = None,
 ) -> PipelineResult:
     """Runs a checked linear curriculum and automatically connects its stages.
 
@@ -808,12 +809,19 @@ def train_pipeline(
     compatible model. Every later stage receives the preceding best weights;
     users never need to wire per-stage ``init_from`` paths manually. Dataset
     audits and tokenizer reports are written before the first optimizer step.
+    ``resume_stage`` restores an interrupted checkpoint; ``restart_stage``
+    starts one stage again from its verified completed parent.
     """
     path = Path(pipeline_path).resolve()
     pipeline, stages = _load_pipeline(path)
-    if resume_stage is not None and resume_stage not in {stage.name for stage in stages}:
-        raise ValueError(f"unknown resume stage: {resume_stage}")
-    if resume_stage is None:
+    if resume_stage is not None and restart_stage is not None:
+        raise ValueError("resume_stage and restart_stage are mutually exclusive")
+    continuation_stage = resume_stage or restart_stage
+    if continuation_stage is not None and continuation_stage not in {
+        stage.name for stage in stages
+    }:
+        raise ValueError(f"unknown continuation stage: {continuation_stage}")
+    if continuation_stage is None:
         occupied = [
             stage.output_dir
             for stage in stages
@@ -822,10 +830,13 @@ def train_pipeline(
         if occupied:
             raise FileExistsError(
                 "stage outputs are not empty; use new output directories or "
-                f"resume_stage instead of overwriting weights: {occupied}"
+                "resume_stage/restart_stage instead of overwriting weights: "
+                f"{occupied}"
             )
     elif _tokenizer_settings(pipeline).get("retrain", False):
-        raise ValueError("tokenizer.retrain cannot be used while resuming a stage")
+        raise ValueError(
+            "tokenizer.retrain cannot be used while resuming or restarting a stage"
+        )
     raw_configs = _load_stage_configs(path, pipeline, stages)
     for stage, config in zip(stages, raw_configs):
         _validate_stage(stage, config)
@@ -881,10 +892,10 @@ def train_pipeline(
         if "initial_weights" in pipeline else None
     )
     parent_stage: str | None = "initial_weights" if parent_weights else None
-    skipping = resume_stage is not None
+    skipping = continuation_stage is not None
     for stage, config in zip(stages, effective_configs):
         lineage_path = stage.output_dir / "lineage.json"
-        if skipping and stage.name != resume_stage:
+        if skipping and stage.name != continuation_stage:
             if not lineage_path.is_file():
                 raise FileNotFoundError(
                     f"cannot skip incomplete parent stage {stage.name}: {lineage_path}"
@@ -908,7 +919,17 @@ def train_pipeline(
         skipping = False
         resume: Path | None = None
         initialized_from = parent_weights
-        if resume_stage == stage.name:
+        if restart_stage == stage.name:
+            if stage.output_dir.exists() and any(stage.output_dir.iterdir()):
+                raise FileExistsError(
+                    f"stage output is not empty: {stage.output_dir}; archive or move "
+                    "the failed run before restarting it"
+                )
+            print(
+                f"Restarting stage {stage.name} from verified parent weights",
+                flush=True,
+            )
+        elif resume_stage == stage.name:
             if not lineage_path.is_file():
                 raise FileNotFoundError(
                     f"stage lineage not found; refusing an unverified resume: {lineage_path}"
@@ -1167,11 +1188,19 @@ def main() -> None:
     )
     parser.add_argument("pipeline", nargs="?", type=Path, default=Path("pipeline.json"))
     parser.add_argument("--backend", choices=("auto", "cuda", "cpp", "python"))
-    parser.add_argument("--resume-stage", help="resume one interrupted stage by name")
+    continuation = parser.add_mutually_exclusive_group()
+    continuation.add_argument(
+        "--resume-stage", help="resume one interrupted stage by name",
+    )
+    continuation.add_argument(
+        "--restart-stage",
+        help="restart one stage from its completed parent using an empty output directory",
+    )
     args = parser.parse_args()
     try:
         result = train_pipeline(
             args.pipeline, backend=args.backend, resume_stage=args.resume_stage,
+            restart_stage=args.restart_stage,
         )
     except PipelineQualityError as exc:
         raise SystemExit(f"Pipeline stopped: {exc}") from None
