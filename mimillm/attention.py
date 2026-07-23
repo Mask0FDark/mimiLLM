@@ -39,13 +39,10 @@ class MultiHeadCausalSelfAttention(Module):
         query = query.permute((0, 2, 1, 3))
         key = key.permute((0, 2, 1, 3))
         value = value.permute((0, 2, 1, 3))
-        scores = query.matmul(key.transpose(-2, -1)) / math.sqrt(self.head_dimension)
-        mask_values = [
-            0.0 if column <= row else -1.0e9
-            for row in range(time) for column in range(time)
-        ]
-        mask = Tensor(mask_values, (1, 1, time, time))
-        weights = (scores + mask).softmax(axis=-1)
+        scores = query.matmul(key.transpose(-2, -1))
+        weights = scores.causal_softmax(
+            scale=1.0 / math.sqrt(self.head_dimension),
+            sequence_length=time,
+        )
         context = weights.matmul(value).permute((0, 2, 1, 3))
         return self.output(context.reshape(batch, time, self.dimension))
-

@@ -11,6 +11,7 @@ from mimillm.tokenizer import (
     analyze_tokenizer,
     create_tokenizer,
     detokenize,
+    format_dialogue_prompt,
     format_qa_text,
     load_tokenizer,
     pretokenize,
@@ -57,6 +58,19 @@ class ByteTokenizerTests(unittest.TestCase):
             ],
             self.tokenizer.encode_prompt(question),
         )
+
+    def test_dialogue_prompt_formatter_preserves_turn_order(self) -> None:
+        prompt = format_dialogue_prompt(
+            [("Меня зовут Лев.", "Приятно познакомиться, Лев.")],
+            "Как меня зовут?",
+        )
+        self.assertEqual(
+            prompt,
+            "Меня зовут Лев.\nОтвет: Приятно познакомиться, Лев."
+            "\n\nВопрос: Как меня зовут?",
+        )
+        with self.assertRaisesRegex(TypeError, "history item"):
+            format_dialogue_prompt([("вопрос", 7)], "следующий")  # type: ignore[list-item]
 
     def test_prompt_has_no_eos(self) -> None:
         tokens = self.tokenizer.encode_prompt("Кто ты?")

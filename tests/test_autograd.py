@@ -30,6 +30,8 @@ class AutogradTests(unittest.TestCase):
         result = value * value + value
         result.backward()
         self.assertAlmostEqual(value.grad[0], 5.0, places=5)  # type: ignore[index]
+        self.assertEqual(result.parents, ())
+        self.assertIsNone(result._backward_fn)
 
     def test_multiplication_mean_and_relu_gradcheck(self) -> None:
         left = Tensor([-1.2, 0.7, 2.0], (3,), requires_grad=True)

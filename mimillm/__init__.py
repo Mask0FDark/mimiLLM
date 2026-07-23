@@ -55,6 +55,7 @@ from .tokenizer import (
     analyze_tokenizer,
     create_tokenizer,
     detokenize,
+    format_dialogue_prompt,
     format_qa_text,
     load_tokenizer,
     pretokenize,
@@ -120,6 +121,7 @@ __all__ = [
     "discover_text_files",
     "detokenize",
     "evaluate_dialogues",
+    "format_dialogue_prompt",
     "format_qa_text",
     "generate",
     "generate_response",
@@ -157,4 +159,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.10.4"
+__version__ = "0.10.5"

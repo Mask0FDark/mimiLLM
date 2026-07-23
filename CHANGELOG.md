@@ -1,5 +1,78 @@
 # Changelog / История изменений
 
+## 0.10.5 — 2026-07-23
+
+### English
+
+- Reworked the native CUDA training path so intermediate tensors, model
+  parameters, gradients, and AdamW state remain device-resident instead of
+  making a host round trip after every primitive operation.
+- CUDA matrix multiplication now uses cuBLAS when it is available and falls
+  back to the bundled NVRTC kernel otherwise. Redundant context-wide
+  synchronization after every kernel launch was removed.
+- The training benchmark now reports forward, loss, backward, clipping,
+  optimizer, and zero-grad timings and can benchmark a real BPE vocabulary.
+- Added chained device-residency tests and an end-to-end CUDA/C++ training-step
+  parity check. The full 162-test suite passes on Windows with CUDA.
+- The CUDA workspace pool is now bounded and uses reusable size classes.
+  Excess inactive blocks are returned to the driver, and an allocation that
+  runs out of VRAM is retried after clearing the inactive cache.
+- AdamW parameters and moments are synchronized to the host lazily. Residual
+  gradients are copied inside VRAM instead of being downloaded merely to avoid
+  aliasing, and global gradient clipping uses one device reduction.
+- Autograd now releases every completed graph immediately. Its iterative graph
+  walk removes a Python reference cycle that previously retained several
+  batches of CUDA tensors and could eventually exhaust VRAM.
+- Common linear-layer bias additions and bias gradients use dedicated CUDA
+  kernels instead of generic broadcast metadata and atomic reductions.
+- Matrix-multiplication gradients now use cuBLAS transpose flags directly, so
+  backward no longer materializes a transposed copy before every GEMM.
+- RMSNorm and scaled causal softmax now have fused forward and backward CUDA
+  kernels. Attention no longer creates a separate scale buffer or a dense
+  causal-mask tensor on the GPU.
+- On the 300,080-parameter reference benchmark (context 128, batch 16), the
+  optimized native CUDA path improved from 3,407 to 8,687 tokens/s on the same
+  RTX 3050 Laptop GPU workload. This benchmark uses mimiLLM only.
+- Staged tokenizer checks can now reject excessive tokens per word and raw-byte
+  fallback, catching vocabularies that look acceptable by tokens/byte but
+  fragment held-out language badly.
+
+### Русский
+
+- Переработан собственный CUDA-путь обучения: промежуточные тензоры, параметры
+  модели, градиенты и состояние AdamW остаются в памяти видеокарты вместо
+  возврата через CPU после каждой элементарной операции.
+- Матричные умножения используют cuBLAS, когда библиотека доступна, и
+  автоматически возвращаются к встроенному NVRTC-ядру в остальных случаях.
+  Лишняя полная синхронизация CUDA-контекста после каждого kernel удалена.
+- Benchmark обучения теперь отдельно измеряет forward, loss, backward,
+  clipping, optimizer и zero-grad и умеет использовать настоящий BPE-словарь.
+- Добавлены тест цепочки device-resident операций и сравнение полного шага
+  обучения CUDA с C++ backend. На Windows с CUDA проходят все 162 теста.
+- Пул временной CUDA-памяти теперь ограничен и использует повторно применяемые
+  классы размеров. Лишние неактивные блоки возвращаются драйверу, а при нехватке
+  VRAM выделение памяти повторяется после очистки неактивного кэша.
+- Параметры и моменты AdamW синхронизируются с CPU только по необходимости.
+  Градиенты residual-связей копируются внутри VRAM, а global gradient clipping
+  использует одно суммирование на видеокарте.
+- Autograd сразу освобождает завершённый граф. Итеративный обход устраняет цикл
+  Python-ссылок, который раньше удерживал CUDA-тензоры нескольких batch и мог
+  постепенно исчерпать VRAM.
+- Для прибавления bias в Linear и вычисления его градиента добавлены отдельные
+  CUDA-ядра без общей broadcast-метадаты и лишних atomic-операций.
+- Градиенты матричного умножения используют флаги transpose самого cuBLAS:
+  backward больше не создаёт отдельную транспонированную копию перед каждым
+  GEMM.
+- Для RMSNorm и scaled causal softmax добавлены слитые CUDA-ядра forward и
+  backward. Attention больше не создаёт отдельный буфер масштабирования и
+  плотный тензор causal mask на видеокарте.
+- В эталонном тесте модели на 300 080 параметров (контекст 128, batch 16)
+  собственный CUDA-путь ускорился с 3 407 до 8 687 токенов/с на той же
+  RTX 3050 Laptop GPU. В этом замере используется только mimiLLM.
+- Проверка токенизатора в pipeline теперь может ограничивать tokens/word и долю
+  byte fallback. Так отсеивается словарь, который выглядит приемлемо по
+  tokens/byte, но сильно дробит незнакомые формулировки.
+
 ## 0.10.4 — 2026-07-21
 
 ### English

@@ -6,6 +6,7 @@ import ctypes
 import os
 import shutil
 import sys
+import weakref
 from array import array
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
@@ -15,11 +16,61 @@ from typing import Any
 
 
 CUDA_SUCCESS = 0
+CUDA_ERROR_OUT_OF_MEMORY = 2
 BLOCK_SIZE = 256
 TILE_SIZE = 16
+DEFAULT_POOL_LIMIT_BYTES = 256 * 1024 * 1024
+DEFAULT_POOL_BLOCKS_PER_SIZE = 2
 CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 16
 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75
 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76
+
+
+class _CudaArray(array):
+    """Host mirror whose matching device allocation may be reused by CUDA ops."""
+
+    _mimillm_cuda_array = True
+
+    def _ensure_host(self) -> None:
+        if getattr(self, "_host_current", True):
+            return
+        runtime_reference = getattr(self, "_runtime_reference", None)
+        runtime = runtime_reference() if runtime_reference is not None else None
+        if runtime is None:
+            raise RuntimeError("CUDA tensor lost its runtime before host synchronization")
+        runtime.materialize(self)
+
+    def __iter__(self):
+        self._ensure_host()
+        return super().__iter__()
+
+    def __getitem__(self, key):
+        self._ensure_host()
+        return super().__getitem__(key)
+
+    def __setitem__(self, key, value) -> None:
+        self._ensure_host()
+        super().__setitem__(key, value)
+        self._host_current = True
+        self._device_current = False
+
+    def __repr__(self) -> str:
+        self._ensure_host()
+        return super().__repr__()
+
+    def tolist(self) -> list[float]:
+        self._ensure_host()
+        return super().tolist()
+
+    def tobytes(self) -> bytes:
+        self._ensure_host()
+        return super().tobytes()
+
+
+def _output_storage(count: int) -> _CudaArray:
+    storage = _CudaArray("f")
+    storage.frombytes(bytes(count * 4))
+    return storage
 
 
 def kernel_source_path() -> Path:
@@ -177,6 +228,115 @@ class _Nvrtc:
             self.library.nvrtcDestroyProgram(ctypes.byref(program))
 
 
+class _Cublas:
+    """Minimal cuBLAS wrapper sharing mimiLLM's current Driver API context."""
+
+    def __init__(self) -> None:
+        self.library = self._load_library()
+        self._configure()
+        self.handle = ctypes.c_void_p()
+        self._check(self.library.cublasCreate_v2(ctypes.byref(self.handle)), "cublasCreate")
+
+    @staticmethod
+    def _load_library() -> ctypes.CDLL:
+        loader = ctypes.WinDLL if sys.platform == "win32" else ctypes.CDLL
+        candidates: list[Path] = []
+        if sys.platform == "win32":
+            roots = [
+                Path(value) for value in (
+                    os.environ.get("CUDA_PATH"),
+                    os.environ.get("CUDA_HOME"),
+                ) if value
+            ]
+            toolkit_root = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+            if toolkit_root.is_dir():
+                roots.extend(sorted(toolkit_root.glob("v*"), reverse=True))
+            for root in roots:
+                candidates.extend(sorted((root / "bin").glob("cublas64_*.dll"), reverse=True))
+        else:
+            for root in filter(None, (os.environ.get("CUDA_PATH"), os.environ.get("CUDA_HOME"))):
+                candidates.extend(sorted((Path(root) / "lib64").glob("libcublas.so*"), reverse=True))
+            candidates.extend(Path("/usr/local/cuda/lib64").glob("libcublas.so*"))
+        for candidate in candidates:
+            try:
+                return loader(str(candidate))
+            except OSError:
+                continue
+        for name in (
+            ("cublas64_13.dll", "cublas64_12.dll")
+            if sys.platform == "win32"
+            else ("libcublas.so", "libcublas.so.13", "libcublas.so.12")
+        ):
+            try:
+                return loader(name)
+            except OSError:
+                continue
+        raise FileNotFoundError("cuBLAS was not found")
+
+    def _configure(self) -> None:
+        library = self.library
+        library.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        library.cublasCreate_v2.restype = ctypes.c_int
+        library.cublasSgemm_v2.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_float), ctypes.c_void_p, ctypes.c_int,
+            ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_float),
+            ctypes.c_void_p, ctypes.c_int,
+        ]
+        library.cublasSgemm_v2.restype = ctypes.c_int
+        library.cublasSgemmStridedBatched.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_float), ctypes.c_void_p, ctypes.c_int, ctypes.c_longlong,
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_longlong,
+            ctypes.POINTER(ctypes.c_float), ctypes.c_void_p, ctypes.c_int,
+            ctypes.c_longlong, ctypes.c_int,
+        ]
+        library.cublasSgemmStridedBatched.restype = ctypes.c_int
+
+    @staticmethod
+    def _check(status: int, operation: str) -> None:
+        if status != 0:
+            raise RuntimeError(f"{operation} failed with cuBLAS status {status}")
+
+    def matmul(
+        self, left: int, right: int, output: int,
+        batches: int, rows: int, inner: int, columns: int,
+        *,
+        transpose_left: bool = False,
+        transpose_right: bool = False,
+    ) -> None:
+        alpha = ctypes.c_float(1.0)
+        beta = ctypes.c_float(0.0)
+        operation_right = 1 if transpose_right else 0
+        operation_left = 1 if transpose_left else 0
+        right_leading = inner if transpose_right else columns
+        left_leading = rows if transpose_left else inner
+        arguments = (
+            self.handle, operation_right, operation_left,
+            columns, rows, inner,
+            ctypes.byref(alpha), ctypes.c_void_p(right), right_leading,
+            ctypes.c_void_p(left), left_leading, ctypes.byref(beta),
+            ctypes.c_void_p(output), columns,
+        )
+        if batches == 1:
+            self._check(self.library.cublasSgemm_v2(*arguments), "cublasSgemm")
+            return
+        self._check(
+            self.library.cublasSgemmStridedBatched(
+                self.handle, operation_right, operation_left,
+                columns, rows, inner,
+                ctypes.byref(alpha), ctypes.c_void_p(right), right_leading,
+                inner * columns,
+                ctypes.c_void_p(left), left_leading, rows * inner,
+                ctypes.byref(beta), ctypes.c_void_p(output), columns,
+                rows * columns, batches,
+            ),
+            "cublasSgemmStridedBatched",
+        )
+
+
 class _CudaRuntime:
     """Own a CUDA context, compiled module, kernel handles, and device buffers."""
 
@@ -213,6 +373,32 @@ class _CudaRuntime:
         )
         self._functions: dict[str, ctypes.c_void_p] = {}
         self._pool: dict[int, list[int]] = defaultdict(list)
+        self._pool_bytes = 0
+        configured_pool_mb = os.environ.get("MIMILLM_CUDA_POOL_MB")
+        if configured_pool_mb is None:
+            self._pool_limit_bytes = min(
+                DEFAULT_POOL_LIMIT_BYTES,
+                max(32 * 1024 * 1024, self.device_memory // 16),
+            )
+        else:
+            try:
+                pool_mb = int(configured_pool_mb)
+            except ValueError as exc:
+                raise ValueError(
+                    "MIMILLM_CUDA_POOL_MB must be a non-negative integer"
+                ) from exc
+            if pool_mb < 0:
+                raise ValueError(
+                    "MIMILLM_CUDA_POOL_MB must be a non-negative integer"
+                )
+            self._pool_limit_bytes = pool_mb * 1024 * 1024
+        self._pool_blocks_per_size = DEFAULT_POOL_BLOCKS_PER_SIZE
+        self._tensor_cache: dict[int, tuple[weakref.ReferenceType[array], int, int]] = {}
+        self._persistent_arrays: set[int] = set()
+        try:
+            self.cublas: _Cublas | None = _Cublas()
+        except (FileNotFoundError, OSError, RuntimeError):
+            self.cublas = None
 
     def _configure_driver(self) -> None:
         driver = self.driver
@@ -287,16 +473,198 @@ class _CudaRuntime:
             self._functions[name] = result
         return self._functions[name]
 
-    def allocate(self, size: int) -> int:
+    @staticmethod
+    def _allocation_size(size: int) -> int:
+        """Round temporary allocations into reusable size classes."""
         size = max(1, int(size))
-        if self._pool[size]:
-            return self._pool[size].pop()
+        quantum = 64 * 1024 if size <= 1024 * 1024 else 1024 * 1024
+        return ((size + quantum - 1) // quantum) * quantum
+
+    def allocate(self, size: int) -> int:
+        allocation_size = self._allocation_size(size)
+        if self._pool[allocation_size]:
+            self._pool_bytes -= allocation_size
+            return self._pool[allocation_size].pop()
         pointer = ctypes.c_uint64()
-        self._check(self.driver.cuMemAlloc_v2(ctypes.byref(pointer), size), "cuMemAlloc")
+        status = self.driver.cuMemAlloc_v2(
+            ctypes.byref(pointer), allocation_size
+        )
+        if status == CUDA_ERROR_OUT_OF_MEMORY and self._pool_bytes:
+            self.empty_cache()
+            status = self.driver.cuMemAlloc_v2(
+                ctypes.byref(pointer), allocation_size
+            )
+        self._check(status, "cuMemAlloc")
         return int(pointer.value)
 
     def release(self, pointer: int, size: int) -> None:
-        self._pool[max(1, int(size))].append(pointer)
+        if not pointer:
+            return
+        allocation_size = self._allocation_size(size)
+        bucket = self._pool[allocation_size]
+        should_cache = (
+            allocation_size <= self._pool_limit_bytes
+            and self._pool_bytes + allocation_size <= self._pool_limit_bytes
+            and len(bucket) < self._pool_blocks_per_size
+        )
+        if should_cache:
+            bucket.append(pointer)
+            self._pool_bytes += allocation_size
+            return
+        self._check(self.driver.cuMemFree_v2(pointer), "cuMemFree")
+
+    def empty_cache(self) -> None:
+        """Return all inactive pooled allocations to the CUDA driver."""
+        first_error: RuntimeError | None = None
+        for bucket in self._pool.values():
+            while bucket:
+                pointer = bucket.pop()
+                try:
+                    self._check(self.driver.cuMemFree_v2(pointer), "cuMemFree")
+                except RuntimeError as exc:
+                    if first_error is None:
+                        first_error = exc
+        self._pool.clear()
+        self._pool_bytes = 0
+        if first_error is not None:
+            raise first_error
+
+    def memory_stats(self) -> dict[str, int]:
+        """Report owned CUDA allocations without materializing any tensors."""
+        cached_bytes = sum(
+            size for reference, _, size in self._tensor_cache.values()
+            if reference() is not None
+        )
+        return {
+            "pool_bytes": self._pool_bytes,
+            "pool_limit_bytes": self._pool_limit_bytes,
+            "pool_blocks": sum(len(bucket) for bucket in self._pool.values()),
+            "tensor_cache_bytes": cached_bytes,
+            "tensor_cache_entries": sum(
+                1
+                for reference, _, _ in self._tensor_cache.values()
+                if reference() is not None
+            ),
+            "persistent_entries": len(self._persistent_arrays),
+        }
+
+    def _release_cached(
+        self, identity: int, reference: weakref.ReferenceType[array],
+    ) -> None:
+        entry = self._tensor_cache.get(identity)
+        if entry is None or entry[0] is not reference:
+            return
+        _, pointer, size = self._tensor_cache.pop(identity)
+        self._persistent_arrays.discard(identity)
+        self.release(pointer, size)
+
+    def _cached_pointer(self, storage: array, size: int) -> int | None:
+        entry = self._tensor_cache.get(id(storage))
+        if entry is None:
+            return None
+        reference, pointer, cached_size = entry
+        if reference() is storage and cached_size == size:
+            return pointer
+        self._tensor_cache.pop(id(storage), None)
+        self._persistent_arrays.discard(id(storage))
+        if reference() is not None:
+            self.release(pointer, cached_size)
+        return None
+
+    def register_persistent(self, storage: array) -> None:
+        """Keep an authoritative device mirror until the host array is released."""
+        size = max(1, len(storage) * storage.itemsize)
+        self._persistent_arrays.add(id(storage))
+        cached = self._cached_pointer(storage, size)
+        if cached is not None:
+            if (
+                getattr(storage, "_mimillm_cuda_array", False)
+                and not getattr(storage, "_device_current", True)
+            ):
+                self.upload(cached, storage)
+            return
+        pointer = self.allocate(size)
+        self.upload(pointer, storage)
+        self._cache_pointer(storage, pointer, size)
+
+    def _take_cached_pointer(self, storage: array, size: int) -> int | None:
+        pointer = self._cached_pointer(storage, size)
+        if pointer is not None:
+            self._tensor_cache.pop(id(storage), None)
+        return pointer
+
+    def _cache_pointer(self, storage: array, pointer: int, size: int) -> None:
+        identity = id(storage)
+        existing = self._tensor_cache.pop(identity, None)
+        if existing is not None and existing[0]() is not storage:
+            self.release(existing[1], existing[2])
+        reference = weakref.ref(
+            storage,
+            lambda ref, key=identity: self._release_cached(key, ref),
+        )
+        self._tensor_cache[identity] = (reference, pointer, size)
+
+    @contextmanager
+    def tensor_buffers(
+        self, *specifications: tuple[array, str],
+    ) -> Iterator[tuple[int, ...]]:
+        """Borrow cached device mirrors for input, output, or in-place arrays."""
+        pointers: list[int] = []
+        temporary: list[tuple[int, int]] = []
+        cache_after: list[tuple[array, int, int]] = []
+        completed = False
+        try:
+            for storage, mode in specifications:
+                if mode not in {"in", "out", "inout"}:
+                    raise ValueError(f"unknown CUDA buffer mode: {mode}")
+                size = max(1, len(storage) * storage.itemsize)
+                persistent = id(storage) in self._persistent_arrays
+                reusable = persistent or getattr(
+                    storage, "_mimillm_cuda_array", False
+                )
+                pointer = (
+                    self._cached_pointer(storage, size)
+                    if mode == "in" and reusable
+                    else self._take_cached_pointer(storage, size)
+                    if mode == "in"
+                    else self._cached_pointer(storage, size)
+                    if mode == "inout"
+                    else None
+                )
+                if pointer is None:
+                    pointer = self.allocate(size)
+                    temporary.append((pointer, size))
+                    if mode in {"in", "inout"}:
+                        self.upload(pointer, storage)
+                elif (
+                    mode in {"in", "inout"}
+                    and getattr(storage, "_mimillm_cuda_array", False)
+                    and not getattr(storage, "_device_current", True)
+                ):
+                    self.upload(pointer, storage)
+                elif mode == "in" and not reusable:
+                    temporary.append((pointer, size))
+                pointers.append(pointer)
+                if (
+                    mode in {"out", "inout"}
+                    and (
+                        getattr(storage, "_mimillm_cuda_array", False)
+                        or persistent
+                    )
+                    and self._cached_pointer(storage, size) is None
+                ):
+                    cache_after.append((storage, pointer, size))
+            yield tuple(pointers)
+            completed = True
+        finally:
+            cached_pointers: set[int] = set()
+            if completed:
+                for storage, pointer, size in cache_after:
+                    self._cache_pointer(storage, pointer, size)
+                    cached_pointers.add(pointer)
+            for pointer, size in temporary:
+                if pointer not in cached_pointers:
+                    self.release(pointer, size)
 
     @contextmanager
     def buffers(self, *sizes: int) -> Iterator[tuple[int, ...]]:
@@ -309,6 +677,8 @@ class _CudaRuntime:
                 self.release(pointer, size)
 
     def upload(self, pointer: int, storage: array) -> None:
+        if getattr(storage, "_mimillm_cuda_array", False):
+            storage._ensure_host()
         size = len(storage) * storage.itemsize
         if not size:
             return
@@ -317,6 +687,8 @@ class _CudaRuntime:
             self.driver.cuMemcpyHtoD_v2(pointer, ctypes.cast(view, ctypes.c_void_p), size),
             "cuMemcpyHtoD",
         )
+        if getattr(storage, "_mimillm_cuda_array", False):
+            storage._device_current = True
 
     def download(self, storage: array, pointer: int) -> None:
         size = len(storage) * storage.itemsize
@@ -327,6 +699,23 @@ class _CudaRuntime:
             self.driver.cuMemcpyDtoH_v2(ctypes.cast(view, ctypes.c_void_p), pointer, size),
             "cuMemcpyDtoH",
         )
+
+    def finish_output(self, storage: array, pointer: int) -> None:
+        """Keep CUDA arrays device-resident; materialize ordinary arrays immediately."""
+        if getattr(storage, "_mimillm_cuda_array", False):
+            storage._host_current = False
+            storage._device_current = True
+            storage._runtime_reference = weakref.ref(self)
+            return
+        self.download(storage, pointer)
+
+    def materialize(self, storage: _CudaArray) -> None:
+        size = max(1, len(storage) * storage.itemsize)
+        pointer = self._cached_pointer(storage, size)
+        if pointer is None:
+            raise RuntimeError("CUDA tensor has no device allocation to materialize")
+        self.download(storage, pointer)
+        storage._host_current = True
 
     def zero(self, pointer: int, size: int) -> None:
         self._check(self.driver.cuMemsetD8_v2(pointer, 0, size), "cuMemsetD8")
@@ -344,6 +733,9 @@ class _CudaRuntime:
             ),
             f"cuLaunchKernel({name})",
         )
+
+    def synchronize(self) -> None:
+        """Wait for queued CUDA work when a host-visible result is not requested."""
         self._check(self.driver.cuCtxSynchronize(), "cuCtxSynchronize")
 
 
@@ -390,43 +782,130 @@ class CudaBackend:
     def _count(value: int) -> ctypes.c_int64:
         return ctypes.c_int64(value)
 
+    def register_optimizer_state(
+        self,
+        parameters: Sequence[array],
+        first_moments: Sequence[array],
+        second_moments: Sequence[array],
+    ) -> None:
+        """Keep model parameters and AdamW moments resident on the GPU."""
+        for storage in (*parameters, *first_moments, *second_moments):
+            self.runtime.register_persistent(storage)
+
+    def prepare_optimizer_state(
+        self,
+        parameters: Sequence[array],
+        first_moments: Sequence[array],
+        second_moments: Sequence[array],
+    ) -> tuple[list[array], list[array], list[array]]:
+        """Create lazily synchronized host mirrors for CUDA optimizer state."""
+        groups: list[list[array]] = []
+        for values in (parameters, first_moments, second_moments):
+            converted: list[array] = []
+            for storage in values:
+                if getattr(storage, "_mimillm_cuda_array", False):
+                    resident = storage
+                else:
+                    resident = _CudaArray("f", storage)
+                    resident._host_current = True
+                    resident._device_current = False
+                converted.append(resident)
+            groups.append(converted)
+        prepared = (groups[0], groups[1], groups[2])
+        self.register_optimizer_state(*prepared)
+        return prepared
+
+    def empty_cache(self) -> None:
+        """Release inactive CUDA workspaces while preserving live tensors."""
+        self.runtime.empty_cache()
+
+    def memory_stats(self) -> dict[str, int]:
+        """Return CUDA cache statistics for diagnostics and stress tests."""
+        return self.runtime.memory_stats()
+
     def _elementwise_binary(
         self, kernel: str, left: Sequence[float], right: Sequence[float],
     ) -> array:
         if len(left) != len(right):
             raise ValueError(f"{kernel}: buffer lengths do not match")
         left_values, right_values = _float_storage(left), _float_storage(right)
-        output = array("f", [0.0]) * len(left_values)
-        size = len(output) * output.itemsize
-        with self.runtime.buffers(size, size, size) as (a, b, result):
-            self.runtime.upload(a, left_values)
-            self.runtime.upload(b, right_values)
+        output = _output_storage(len(left_values))
+        with self.runtime.tensor_buffers(
+            (left_values, "in"), (right_values, "in"), (output, "out"),
+        ) as (a, b, result):
             self.runtime.launch(
                 kernel, ((len(output) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1),
                 (BLOCK_SIZE, 1, 1),
                 [self._pointer(a), self._pointer(b), self._pointer(result), self._count(len(output))],
             )
-            self.runtime.download(output, result)
+            self.runtime.finish_output(output, result)
         return output
 
     def add(self, left: Sequence[float], right: Sequence[float]) -> array:
         return self._elementwise_binary("mimillm_add", left, right)
+
+    def add_row_vector(
+        self, values: Sequence[float], bias: Sequence[float],
+        rows: int, columns: int,
+    ) -> array:
+        """Add one feature vector to every row without broadcast metadata."""
+        source, bias_values = _float_storage(values), _float_storage(bias)
+        if len(source) != rows * columns or len(bias_values) != columns:
+            raise ValueError("row-vector addition buffers do not match their shape")
+        output = _output_storage(len(source))
+        with self.runtime.tensor_buffers(
+            (source, "in"), (bias_values, "in"), (output, "out"),
+        ) as (source_pointer, bias_pointer, output_pointer):
+            self.runtime.launch(
+                "mimillm_add_row_vector",
+                ((len(source) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1),
+                (BLOCK_SIZE, 1, 1),
+                [
+                    self._pointer(source_pointer), self._pointer(bias_pointer),
+                    self._pointer(output_pointer), self._count(len(source)),
+                    self._count(columns),
+                ],
+            )
+            self.runtime.finish_output(output, output_pointer)
+        return output
+
+    def sum_columns(
+        self, values: Sequence[float], rows: int, columns: int,
+    ) -> array:
+        """Reduce a row-major matrix over rows for a bias gradient."""
+        source = _float_storage(values)
+        if len(source) != rows * columns:
+            raise ValueError("column reduction buffer does not match its shape")
+        output = _output_storage(columns)
+        with self.runtime.tensor_buffers(
+            (source, "in"), (output, "out"),
+        ) as (source_pointer, output_pointer):
+            self.runtime.launch(
+                "mimillm_sum_columns", (columns, 1, 1), (BLOCK_SIZE, 1, 1),
+                [
+                    self._pointer(source_pointer), self._pointer(output_pointer),
+                    self._count(rows), self._count(columns),
+                ],
+                shared_memory=BLOCK_SIZE * 4,
+            )
+            self.runtime.finish_output(output, output_pointer)
+        return output
 
     def multiply(self, left: Sequence[float], right: Sequence[float]) -> array:
         return self._elementwise_binary("mimillm_multiply", left, right)
 
     def scalar_multiply(self, values: Sequence[float], scalar: float) -> array:
         source = _float_storage(values)
-        output = array("f", [0.0]) * len(source)
-        size = len(source) * source.itemsize
-        with self.runtime.buffers(size, size) as (input_pointer, output_pointer):
-            self.runtime.upload(input_pointer, source)
+        output = _output_storage(len(source))
+        with self.runtime.tensor_buffers(
+            (source, "in"), (output, "out"),
+        ) as (input_pointer, output_pointer):
             self.runtime.launch(
                 "mimillm_scalar_multiply",
                 ((len(source) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1), (BLOCK_SIZE, 1, 1),
                 [self._pointer(input_pointer), ctypes.c_float(scalar), self._pointer(output_pointer), self._count(len(source))],
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     def permute(
@@ -443,14 +922,16 @@ class CudaBackend:
         output_shape_values = _int64_storage(output_shape)
         output_strides = _int64_storage(_contiguous_strides(output_shape))
         axes_values = _int64_storage(axes)
-        output = array("f", [0.0]) * count
+        output = _output_storage(count)
         metadata_size = len(shape) * 8
-        with self.runtime.buffers(
-            count * 4, count * 4, metadata_size, metadata_size, metadata_size, metadata_size,
-        ) as buffers:
-            source_pointer, output_pointer, source_stride_pointer, shape_pointer, output_stride_pointer, axes_pointer = buffers
+        with self.runtime.tensor_buffers(
+            (source, "in"), (output, "out"),
+        ) as (source_pointer, output_pointer), self.runtime.buffers(
+            metadata_size, metadata_size, metadata_size, metadata_size,
+        ) as metadata_pointers:
+            source_stride_pointer, shape_pointer, output_stride_pointer, axes_pointer = metadata_pointers
             for pointer, storage in (
-                (source_pointer, source), (source_stride_pointer, source_strides),
+                (source_stride_pointer, source_strides),
                 (shape_pointer, output_shape_values), (output_stride_pointer, output_strides),
                 (axes_pointer, axes_values),
             ):
@@ -465,7 +946,7 @@ class CudaBackend:
                     self._count(len(shape)), self._count(count),
                 ],
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     @staticmethod
@@ -493,13 +974,13 @@ class CudaBackend:
     ) -> array:
         left_values, right_values = _float_storage(left), _float_storage(right)
         metadata = self._broadcast_metadata(left_shape, right_shape, output_shape)
-        output = array("f", [0.0]) * _product(output_shape)
+        output = _output_storage(_product(output_shape))
         metadata_size = len(output_shape) * 8
-        sizes = [len(left_values) * 4, len(right_values) * 4, len(output) * 4, *([metadata_size] * 4)]
-        with self.runtime.buffers(*sizes) as buffers:
-            left_pointer, right_pointer, output_pointer, *metadata_pointers = buffers
-            self.runtime.upload(left_pointer, left_values)
-            self.runtime.upload(right_pointer, right_values)
+        with self.runtime.tensor_buffers(
+            (left_values, "in"), (right_values, "in"), (output, "out"),
+        ) as (left_pointer, right_pointer, output_pointer), self.runtime.buffers(
+            *([metadata_size] * 4),
+        ) as metadata_pointers:
             for pointer, storage in zip(metadata_pointers, metadata):
                 self.runtime.upload(pointer, storage)
             self.runtime.launch(
@@ -512,7 +993,7 @@ class CudaBackend:
                     ctypes.c_int32(self._operation_code(operation)),
                 ],
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     def broadcast_binary_backward(
@@ -522,17 +1003,16 @@ class CudaBackend:
     ) -> tuple[array, array]:
         left_values, right_values, gradient = map(_float_storage, (left, right, grad_output))
         metadata = self._broadcast_metadata(left_shape, right_shape, output_shape)
-        grad_left = array("f", [0.0]) * len(left_values)
-        grad_right = array("f", [0.0]) * len(right_values)
+        grad_left = _output_storage(len(left_values))
+        grad_right = _output_storage(len(right_values))
         metadata_size = len(output_shape) * 8
-        sizes = [
-            len(left_values) * 4, len(right_values) * 4, len(gradient) * 4,
-            len(grad_left) * 4, len(grad_right) * 4, *([metadata_size] * 4),
-        ]
-        with self.runtime.buffers(*sizes) as buffers:
-            left_pointer, right_pointer, gradient_pointer, grad_left_pointer, grad_right_pointer, *metadata_pointers = buffers
-            for pointer, storage in ((left_pointer, left_values), (right_pointer, right_values), (gradient_pointer, gradient)):
-                self.runtime.upload(pointer, storage)
+        with self.runtime.tensor_buffers(
+            (left_values, "in"), (right_values, "in"), (gradient, "in"),
+            (grad_left, "out"), (grad_right, "out"),
+        ) as tensor_pointers, self.runtime.buffers(
+            *([metadata_size] * 4),
+        ) as metadata_pointers:
+            left_pointer, right_pointer, gradient_pointer, grad_left_pointer, grad_right_pointer = tensor_pointers
             self.runtime.zero(grad_left_pointer, len(grad_left) * 4)
             self.runtime.zero(grad_right_pointer, len(grad_right) * 4)
             for pointer, storage in zip(metadata_pointers, metadata):
@@ -548,8 +1028,8 @@ class CudaBackend:
                     ctypes.c_int32(self._operation_code(operation)),
                 ],
             )
-            self.runtime.download(grad_left, grad_left_pointer)
-            self.runtime.download(grad_right, grad_right_pointer)
+            self.runtime.finish_output(grad_left, grad_left_pointer)
+            self.runtime.finish_output(grad_right, grad_right_pointer)
         return grad_left, grad_right
 
     def matmul(
@@ -565,40 +1045,152 @@ class CudaBackend:
         if len(left) != batches * rows * inner or len(right) != batches * inner * columns:
             raise ValueError("matmul buffer size does not match its shape")
         left_values, right_values = _float_storage(left), _float_storage(right)
-        output = array("f", [0.0]) * (batches * rows * columns)
-        with self.runtime.buffers(len(left_values) * 4, len(right_values) * 4, len(output) * 4) as pointers:
+        output = _output_storage(batches * rows * columns)
+        with self.runtime.tensor_buffers(
+            (left_values, "in"), (right_values, "in"), (output, "out"),
+        ) as pointers:
             left_pointer, right_pointer, output_pointer = pointers
-            self.runtime.upload(left_pointer, left_values)
-            self.runtime.upload(right_pointer, right_values)
-            self.runtime.launch(
-                "mimillm_matmul",
-                ((columns + TILE_SIZE - 1) // TILE_SIZE, (rows + TILE_SIZE - 1) // TILE_SIZE, batches),
-                (TILE_SIZE, TILE_SIZE, 1),
-                [
-                    self._pointer(left_pointer), self._pointer(right_pointer), self._pointer(output_pointer),
-                    self._count(batches), self._count(rows), self._count(inner), self._count(columns),
-                ],
+            if self.runtime.cublas is not None:
+                self.runtime.cublas.matmul(
+                    left_pointer, right_pointer, output_pointer,
+                    batches, rows, inner, columns,
+                )
+            else:
+                self.runtime.launch(
+                    "mimillm_matmul",
+                    ((columns + TILE_SIZE - 1) // TILE_SIZE, (rows + TILE_SIZE - 1) // TILE_SIZE, batches),
+                    (TILE_SIZE, TILE_SIZE, 1),
+                    [
+                        self._pointer(left_pointer), self._pointer(right_pointer), self._pointer(output_pointer),
+                        self._count(batches), self._count(rows), self._count(inner), self._count(columns),
+                    ],
+                )
+            self.runtime.finish_output(output, output_pointer)
+        return output
+
+    def matmul_backward_left(
+        self, grad_output: Sequence[float], right: Sequence[float],
+        batches: int, rows: int, inner: int, columns: int,
+    ) -> array:
+        """Compute ``grad_output @ right.T`` without materializing ``right.T``."""
+        if self.runtime.cublas is None:
+            right_shape = (
+                (inner, columns)
+                if batches == 1 else
+                (batches, inner, columns)
             )
-            self.runtime.download(output, output_pointer)
+            axes = (
+                (1, 0)
+                if batches == 1 else
+                (0, 2, 1)
+            )
+            transposed = self.permute(right, right_shape, axes)
+            return self.batched_matmul(
+                grad_output, transposed, batches, rows, columns, inner,
+            )
+        gradient, right_values = _float_storage(grad_output), _float_storage(right)
+        if (
+            len(gradient) != batches * rows * columns
+            or len(right_values) != batches * inner * columns
+        ):
+            raise ValueError("matmul left-gradient buffers do not match their shape")
+        output = _output_storage(batches * rows * inner)
+        with self.runtime.tensor_buffers(
+            (gradient, "in"), (right_values, "in"), (output, "out"),
+        ) as (gradient_pointer, right_pointer, output_pointer):
+            self.runtime.cublas.matmul(
+                gradient_pointer, right_pointer, output_pointer,
+                batches, rows, columns, inner,
+                transpose_right=True,
+            )
+            self.runtime.finish_output(output, output_pointer)
+        return output
+
+    def matmul_backward_right(
+        self, left: Sequence[float], grad_output: Sequence[float],
+        batches: int, rows: int, inner: int, columns: int,
+    ) -> array:
+        """Compute ``left.T @ grad_output`` without materializing ``left.T``."""
+        if self.runtime.cublas is None:
+            left_shape = (
+                (rows, inner)
+                if batches == 1 else
+                (batches, rows, inner)
+            )
+            axes = (
+                (1, 0)
+                if batches == 1 else
+                (0, 2, 1)
+            )
+            transposed = self.permute(left, left_shape, axes)
+            return self.batched_matmul(
+                transposed, grad_output, batches, inner, rows, columns,
+            )
+        left_values, gradient = _float_storage(left), _float_storage(grad_output)
+        if (
+            len(left_values) != batches * rows * inner
+            or len(gradient) != batches * rows * columns
+        ):
+            raise ValueError("matmul right-gradient buffers do not match their shape")
+        output = _output_storage(batches * inner * columns)
+        with self.runtime.tensor_buffers(
+            (left_values, "in"), (gradient, "in"), (output, "out"),
+        ) as (left_pointer, gradient_pointer, output_pointer):
+            self.runtime.cublas.matmul(
+                left_pointer, gradient_pointer, output_pointer,
+                batches, inner, rows, columns,
+                transpose_left=True,
+            )
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     def softmax_rows(self, values: Sequence[float], rows: int, columns: int) -> array:
         return self._rows_operation("mimillm_softmax_rows", values, rows, columns)
 
+    def causal_softmax_rows(
+        self, values: Sequence[float], rows: int, columns: int,
+        sequence_length: int, scale: float,
+    ) -> array:
+        """Apply attention scaling, causal masking, and softmax in one kernel."""
+        source = _float_storage(values)
+        if (
+            len(source) != rows * columns
+            or sequence_length <= 0
+            or columns != sequence_length
+            or rows % sequence_length
+        ):
+            raise ValueError("causal softmax buffer does not match its shape")
+        output = _output_storage(len(source))
+        with self.runtime.tensor_buffers(
+            (source, "in"), (output, "out"),
+        ) as (source_pointer, output_pointer):
+            self.runtime.launch(
+                "mimillm_causal_softmax_rows",
+                (rows, 1, 1), (BLOCK_SIZE, 1, 1),
+                [
+                    self._pointer(source_pointer), self._pointer(output_pointer),
+                    self._count(rows), self._count(columns),
+                    self._count(sequence_length), ctypes.c_float(scale),
+                ],
+                shared_memory=BLOCK_SIZE * 4,
+            )
+            self.runtime.finish_output(output, output_pointer)
+        return output
+
     def _rows_operation(self, kernel: str, values: Sequence[float], rows: int, columns: int) -> array:
         source = _float_storage(values)
         if len(source) != rows * columns:
             raise ValueError(f"{kernel}: buffer size does not match its shape")
-        output = array("f", [0.0]) * len(source)
-        size = len(source) * 4
-        with self.runtime.buffers(size, size) as (source_pointer, output_pointer):
-            self.runtime.upload(source_pointer, source)
+        output = _output_storage(len(source))
+        with self.runtime.tensor_buffers(
+            (source, "in"), (output, "out"),
+        ) as (source_pointer, output_pointer):
             self.runtime.launch(
                 kernel, (rows, 1, 1), (BLOCK_SIZE, 1, 1),
                 [self._pointer(source_pointer), self._pointer(output_pointer), self._count(rows), self._count(columns)],
                 shared_memory=BLOCK_SIZE * 4,
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     def softmax_backward(
@@ -608,44 +1200,134 @@ class CudaBackend:
         values, gradient = _float_storage(output_values), _float_storage(grad_output)
         if len(values) != rows * columns or len(gradient) != len(values):
             raise ValueError("softmax backward buffers do not match their shape")
-        output = array("f", [0.0]) * len(values)
-        size = len(values) * 4
-        with self.runtime.buffers(size, size, size) as pointers:
+        output = _output_storage(len(values))
+        with self.runtime.tensor_buffers(
+            (values, "in"), (gradient, "in"), (output, "out"),
+        ) as pointers:
             values_pointer, gradient_pointer, output_pointer = pointers
-            self.runtime.upload(values_pointer, values)
-            self.runtime.upload(gradient_pointer, gradient)
             self.runtime.launch(
                 "mimillm_softmax_backward", (rows, 1, 1), (BLOCK_SIZE, 1, 1),
                 [self._pointer(values_pointer), self._pointer(gradient_pointer), self._pointer(output_pointer), self._count(rows), self._count(columns)],
                 shared_memory=BLOCK_SIZE * 4,
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
+
+    def causal_softmax_backward(
+        self, output_values: Sequence[float], grad_output: Sequence[float],
+        rows: int, columns: int, scale: float,
+    ) -> array:
+        """Backpropagate through the fused scaled causal softmax."""
+        values, gradient = _float_storage(output_values), _float_storage(grad_output)
+        if len(values) != rows * columns or len(gradient) != len(values):
+            raise ValueError("causal softmax backward buffers do not match their shape")
+        output = _output_storage(len(values))
+        with self.runtime.tensor_buffers(
+            (values, "in"), (gradient, "in"), (output, "out"),
+        ) as (values_pointer, gradient_pointer, output_pointer):
+            self.runtime.launch(
+                "mimillm_causal_softmax_backward",
+                (rows, 1, 1), (BLOCK_SIZE, 1, 1),
+                [
+                    self._pointer(values_pointer), self._pointer(gradient_pointer),
+                    self._pointer(output_pointer), self._count(rows),
+                    self._count(columns), ctypes.c_float(scale),
+                ],
+                shared_memory=BLOCK_SIZE * 4,
+            )
+            self.runtime.finish_output(output, output_pointer)
+        return output
+
+    def rms_norm(
+        self, values: Sequence[float], weight: Sequence[float],
+        rows: int, columns: int, epsilon: float,
+    ) -> array:
+        """Normalize and scale rows with one CUDA kernel."""
+        source, scale = _float_storage(values), _float_storage(weight)
+        if len(source) != rows * columns or len(scale) != columns:
+            raise ValueError("RMSNorm buffers do not match their shape")
+        output = _output_storage(len(source))
+        with self.runtime.tensor_buffers(
+            (source, "in"), (scale, "in"), (output, "out"),
+        ) as (source_pointer, scale_pointer, output_pointer):
+            self.runtime.launch(
+                "mimillm_rms_norm", (rows, 1, 1), (BLOCK_SIZE, 1, 1),
+                [
+                    self._pointer(source_pointer), self._pointer(scale_pointer),
+                    self._pointer(output_pointer), self._count(rows),
+                    self._count(columns), ctypes.c_float(epsilon),
+                ],
+                shared_memory=BLOCK_SIZE * 4,
+            )
+            self.runtime.finish_output(output, output_pointer)
+        return output
+
+    def rms_norm_backward(
+        self, values: Sequence[float], weight: Sequence[float],
+        grad_output: Sequence[float], rows: int, columns: int, epsilon: float,
+    ) -> tuple[array, array]:
+        """Return input and scale gradients for fused RMSNorm."""
+        source, scale, gradient = map(
+            _float_storage, (values, weight, grad_output),
+        )
+        if (
+            len(source) != rows * columns
+            or len(scale) != columns
+            or len(gradient) != len(source)
+        ):
+            raise ValueError("RMSNorm backward buffers do not match their shape")
+        grad_input = _output_storage(len(source))
+        grad_weight = _output_storage(columns)
+        with self.runtime.tensor_buffers(
+            (source, "in"), (scale, "in"), (gradient, "in"),
+            (grad_input, "out"), (grad_weight, "out"),
+        ) as pointers:
+            (
+                source_pointer, scale_pointer, gradient_pointer,
+                grad_input_pointer, grad_weight_pointer,
+            ) = pointers
+            self.runtime.zero(grad_weight_pointer, columns * 4)
+            self.runtime.launch(
+                "mimillm_rms_norm_backward",
+                (rows, 1, 1), (BLOCK_SIZE, 1, 1),
+                [
+                    self._pointer(source_pointer), self._pointer(scale_pointer),
+                    self._pointer(gradient_pointer), self._pointer(grad_input_pointer),
+                    self._pointer(grad_weight_pointer), self._count(rows),
+                    self._count(columns), ctypes.c_float(epsilon),
+                ],
+                shared_memory=BLOCK_SIZE * 8,
+            )
+            self.runtime.finish_output(grad_input, grad_input_pointer)
+            self.runtime.finish_output(grad_weight, grad_weight_pointer)
+        return grad_input, grad_weight
 
     def sum_rows(self, values: Sequence[float], rows: int, columns: int) -> array:
         source = _float_storage(values)
-        output = array("f", [0.0]) * rows
-        with self.runtime.buffers(len(source) * 4, rows * 4) as (source_pointer, output_pointer):
-            self.runtime.upload(source_pointer, source)
+        output = _output_storage(rows)
+        with self.runtime.tensor_buffers(
+            (source, "in"), (output, "out"),
+        ) as (source_pointer, output_pointer):
             self.runtime.launch(
                 "mimillm_sum_rows", (rows, 1, 1), (BLOCK_SIZE, 1, 1),
                 [self._pointer(source_pointer), self._pointer(output_pointer), self._count(rows), self._count(columns)],
                 shared_memory=BLOCK_SIZE * 4,
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     def sum_rows_backward(self, grad_output: Sequence[float], rows: int, columns: int) -> array:
         gradient = _float_storage(grad_output)
-        output = array("f", [0.0]) * (rows * columns)
-        with self.runtime.buffers(len(gradient) * 4, len(output) * 4) as (gradient_pointer, output_pointer):
-            self.runtime.upload(gradient_pointer, gradient)
+        output = _output_storage(rows * columns)
+        with self.runtime.tensor_buffers(
+            (gradient, "in"), (output, "out"),
+        ) as (gradient_pointer, output_pointer):
             self.runtime.launch(
                 "mimillm_sum_rows_backward", ((len(output) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1),
                 (BLOCK_SIZE, 1, 1),
                 [self._pointer(gradient_pointer), self._pointer(output_pointer), self._count(len(output)), self._count(columns)],
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     def relu(self, values: Sequence[float]) -> array:
@@ -653,63 +1335,62 @@ class CudaBackend:
 
     def _unary(self, kernel: str, values: Sequence[float]) -> array:
         source = _float_storage(values)
-        output = array("f", [0.0]) * len(source)
-        size = len(source) * 4
-        with self.runtime.buffers(size, size) as (source_pointer, output_pointer):
-            self.runtime.upload(source_pointer, source)
+        output = _output_storage(len(source))
+        with self.runtime.tensor_buffers(
+            (source, "in"), (output, "out"),
+        ) as (source_pointer, output_pointer):
             self.runtime.launch(
                 kernel, ((len(source) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1), (BLOCK_SIZE, 1, 1),
                 [self._pointer(source_pointer), self._pointer(output_pointer), self._count(len(source))],
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     def relu_backward(self, values: Sequence[float], grad_output: Sequence[float]) -> array:
         source, gradient = _float_storage(values), _float_storage(grad_output)
-        output = array("f", [0.0]) * len(source)
-        size = len(source) * 4
-        with self.runtime.buffers(size, size, size) as pointers:
+        output = _output_storage(len(source))
+        with self.runtime.tensor_buffers(
+            (source, "in"), (gradient, "in"), (output, "out"),
+        ) as pointers:
             source_pointer, gradient_pointer, output_pointer = pointers
-            self.runtime.upload(source_pointer, source)
-            self.runtime.upload(gradient_pointer, gradient)
             self.runtime.launch(
                 "mimillm_relu_backward", ((len(source) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1), (BLOCK_SIZE, 1, 1),
                 [self._pointer(source_pointer), self._pointer(gradient_pointer), self._pointer(output_pointer), self._count(len(source))],
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     def embedding_gather(
         self, table: Sequence[float], indices: Sequence[int], vocab: int, width: int,
     ) -> array:
         values, ids = _float_storage(table), _int32_storage(indices)
-        output = array("f", [0.0]) * (len(ids) * width)
-        with self.runtime.buffers(len(values) * 4, len(ids) * 4, len(output) * 4) as pointers:
+        output = _output_storage(len(ids) * width)
+        with self.runtime.tensor_buffers(
+            (values, "in"), (ids, "in"), (output, "out"),
+        ) as pointers:
             table_pointer, ids_pointer, output_pointer = pointers
-            self.runtime.upload(table_pointer, values)
-            self.runtime.upload(ids_pointer, ids)
             self.runtime.launch(
                 "mimillm_embedding_gather", ((len(output) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1), (BLOCK_SIZE, 1, 1),
                 [self._pointer(table_pointer), self._pointer(ids_pointer), self._pointer(output_pointer), self._count(width), self._count(len(output))],
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     def embedding_scatter_add(
         self, indices: Sequence[int], grad_output: Sequence[float], vocab: int, width: int,
     ) -> array:
         ids, gradient = _int32_storage(indices), _float_storage(grad_output)
-        output = array("f", [0.0]) * (vocab * width)
-        with self.runtime.buffers(len(ids) * 4, len(gradient) * 4, len(output) * 4) as pointers:
+        output = _output_storage(vocab * width)
+        with self.runtime.tensor_buffers(
+            (ids, "in"), (gradient, "in"), (output, "out"),
+        ) as pointers:
             ids_pointer, gradient_pointer, output_pointer = pointers
-            self.runtime.upload(ids_pointer, ids)
-            self.runtime.upload(gradient_pointer, gradient)
             self.runtime.zero(output_pointer, len(output) * 4)
             self.runtime.launch(
                 "mimillm_embedding_scatter", ((len(gradient) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1), (BLOCK_SIZE, 1, 1),
                 [self._pointer(ids_pointer), self._pointer(gradient_pointer), self._pointer(output_pointer), self._count(width), self._count(len(gradient))],
             )
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return output
 
     def _cross_entropy(
@@ -719,21 +1400,23 @@ class CudaBackend:
         values, ids = _float_storage(logits), _int32_storage(targets)
         weight_values = _float_storage(weights) if weights is not None else None
         weight_sum = float(sum(weight_values)) if weight_values is not None else float(rows)
-        output_gradient = array("f", [0.0]) * len(values) if gradient else None
-        sizes = [len(values) * 4, len(ids) * 4, 4]
+        output_gradient = _output_storage(len(values)) if gradient else None
+        tensor_specs: list[tuple[array, str]] = [
+            (values, "in"), (ids, "in"),
+        ]
         if weight_values is not None:
-            sizes.append(len(weight_values) * 4)
-        if gradient:
-            sizes.append(len(values) * 4)
-        with self.runtime.buffers(*sizes) as pointers:
-            logits_pointer, ids_pointer, loss_pointer, *remaining = pointers
+            tensor_specs.append((weight_values, "in"))
+        if output_gradient is not None:
+            tensor_specs.append((output_gradient, "out"))
+        with self.runtime.tensor_buffers(*tensor_specs) as tensor_pointers, self.runtime.buffers(
+            4,
+        ) as (loss_pointer,):
+            remaining = list(tensor_pointers)
+            logits_pointer = remaining.pop(0)
+            ids_pointer = remaining.pop(0)
             weights_pointer = remaining.pop(0) if weight_values is not None else 0
-            gradient_pointer = remaining.pop(0) if gradient else 0
-            self.runtime.upload(logits_pointer, values)
-            self.runtime.upload(ids_pointer, ids)
+            gradient_pointer = remaining.pop(0) if output_gradient is not None else 0
             self.runtime.zero(loss_pointer, 4)
-            if weight_values is not None:
-                self.runtime.upload(weights_pointer, weight_values)
             self.runtime.launch(
                 "mimillm_cross_entropy_loss", (rows, 1, 1), (BLOCK_SIZE, 1, 1),
                 [
@@ -741,8 +1424,6 @@ class CudaBackend:
                     ctypes.c_float(weight_sum), self._pointer(loss_pointer), self._count(rows), self._count(classes),
                 ], shared_memory=BLOCK_SIZE * 4,
             )
-            loss_storage = array("f", [0.0])
-            self.runtime.download(loss_storage, loss_pointer)
             if gradient:
                 self.runtime.launch(
                     "mimillm_softmax_rows", (rows, 1, 1), (BLOCK_SIZE, 1, 1),
@@ -757,7 +1438,9 @@ class CudaBackend:
                     ],
                 )
                 assert output_gradient is not None
-                self.runtime.download(output_gradient, gradient_pointer)
+                self.runtime.finish_output(output_gradient, gradient_pointer)
+            loss_storage = array("f", [0.0])
+            self.runtime.download(loss_storage, loss_pointer)
         return float(loss_storage[0]), output_gradient
 
     def cross_entropy(self, logits: Sequence[float], targets: Sequence[int], rows: int, classes: int) -> float:
@@ -786,14 +1469,11 @@ class CudaBackend:
     ) -> None:
         gradient_values = _float_storage(gradient)
         count = len(parameter)
-        size = count * 4
-        with self.runtime.buffers(size, size, size, size) as pointers:
+        with self.runtime.tensor_buffers(
+            (parameter, "inout"), (gradient_values, "in"),
+            (first_moment, "inout"), (second_moment, "inout"),
+        ) as pointers:
             parameter_pointer, gradient_pointer, first_pointer, second_pointer = pointers
-            for pointer, storage in (
-                (parameter_pointer, parameter), (gradient_pointer, gradient_values),
-                (first_pointer, first_moment), (second_pointer, second_moment),
-            ):
-                self.runtime.upload(pointer, storage)
             correction1 = 1.0 - beta1 ** step
             correction2 = 1.0 - beta2 ** step
             self.runtime.launch(
@@ -806,32 +1486,47 @@ class CudaBackend:
                     ctypes.c_float(correction1), ctypes.c_float(correction2),
                 ],
             )
-            self.runtime.download(parameter, parameter_pointer)
-            self.runtime.download(first_moment, first_pointer)
-            self.runtime.download(second_moment, second_pointer)
+            self.runtime.finish_output(parameter, parameter_pointer)
+            self.runtime.finish_output(first_moment, first_pointer)
+            self.runtime.finish_output(second_moment, second_pointer)
 
     def sum_squares(self, values: Sequence[float]) -> float:
-        source = _float_storage(values)
-        with self.runtime.buffers(len(source) * 4, 4) as (source_pointer, output_pointer):
-            self.runtime.upload(source_pointer, source)
+        return self.global_sum_squares((values,))
+
+    def global_sum_squares(
+        self, values: Sequence[Sequence[float]],
+    ) -> float:
+        """Reduce multiple resident gradients with one host synchronization."""
+        sources = [_float_storage(source) for source in values if len(source)]
+        if not sources:
+            return 0.0
+        with self.runtime.buffers(4) as (output_pointer,):
             self.runtime.zero(output_pointer, 4)
-            self.runtime.launch(
-                "mimillm_sum_squares", ((len(source) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1), (BLOCK_SIZE, 1, 1),
-                [self._pointer(source_pointer), self._pointer(output_pointer), self._count(len(source))],
-            )
+            for source in sources:
+                with self.runtime.tensor_buffers(
+                    (source, "in"),
+                ) as (source_pointer,):
+                    self.runtime.launch(
+                        "mimillm_sum_squares",
+                        ((len(source) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1),
+                        (BLOCK_SIZE, 1, 1),
+                        [
+                            self._pointer(source_pointer),
+                            self._pointer(output_pointer),
+                            self._count(len(source)),
+                        ],
+                    )
             output = array("f", [0.0])
-            self.runtime.download(output, output_pointer)
+            self.runtime.finish_output(output, output_pointer)
         return float(output[0])
 
     def scale_inplace(self, values: array, scalar: float) -> None:
-        size = len(values) * 4
-        with self.runtime.buffers(size) as (pointer,):
-            self.runtime.upload(pointer, values)
+        with self.runtime.tensor_buffers((values, "inout")) as (pointer,):
             self.runtime.launch(
                 "mimillm_scalar_multiply", ((len(values) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1), (BLOCK_SIZE, 1, 1),
                 [self._pointer(pointer), ctypes.c_float(scalar), self._pointer(pointer), self._count(len(values))],
             )
-            self.runtime.download(values, pointer)
+            self.runtime.finish_output(values, pointer)
 
 
 def is_available() -> bool:

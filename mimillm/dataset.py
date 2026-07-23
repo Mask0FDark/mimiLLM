@@ -8,7 +8,7 @@ import random
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-from .tokenizer import ByteTokenizer
+from .tokenizer import ByteTokenizer, format_dialogue_prompt
 
 
 TEXT_SUFFIXES = {".txt", ".md", ".text"}
@@ -96,10 +96,9 @@ def _dialogue_examples(file_path: Path) -> list[tuple[str, str]]:
                 raise ValueError(
                     f"{file_path}, строка {line_number}: роли должны чередоваться user/assistant, а content не должен быть пустым"
                 )
-            question = "".join(
-                f"{old_question}\nОтвет: {old_answer}\n\nВопрос: "
-                for old_question, old_answer in turns
-            ) + user["content"].strip()
+            question = format_dialogue_prompt(
+                turns, user["content"].strip(),
+            )
             answer = assistant["content"].strip()
             result.append((question, answer))
             turns.append((user["content"].strip(), answer))

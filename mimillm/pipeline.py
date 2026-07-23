@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import math
@@ -13,7 +14,7 @@ from typing import Any, Iterable
 
 from .api import load_model, save_model
 from .audit import DatasetAuditReport, audit_dataset, normalize_training_text
-from .backend import reset_backend
+from .backend import get_backend, reset_backend
 from .dataset import load_qa_text, load_text_documents
 from .evaluation import (
     DialogueEvaluationReport,
@@ -357,6 +358,7 @@ def _tokenizer_settings(values: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "type", "path", "vocab_size", "min_frequency",
         "ensure_unicode_characters", "retrain", "max_compression_ratio",
+        "max_tokens_per_word", "max_raw_byte_fraction",
         "min_unicode_atomic_coverage", "required_pieces",
     }
     unknown = sorted(set(raw) - allowed)
@@ -517,6 +519,8 @@ def _validate_tokenizer_reports(
         return
     settings = _tokenizer_settings(pipeline)
     maximum = settings.get("max_compression_ratio", 0.80)
+    maximum_tokens_per_word = settings.get("max_tokens_per_word", 8.0)
+    maximum_raw_byte_fraction = settings.get("max_raw_byte_fraction", 0.60)
     minimum_unicode = settings.get("min_unicode_atomic_coverage", 0.95)
     if (
         not isinstance(maximum, (int, float))
@@ -524,6 +528,19 @@ def _validate_tokenizer_reports(
         or not 0.0 < maximum <= 1.0
     ):
         raise ValueError("tokenizer.max_compression_ratio must be in (0, 1]")
+    if (
+        not isinstance(maximum_tokens_per_word, (int, float))
+        or isinstance(maximum_tokens_per_word, bool)
+        or not math.isfinite(maximum_tokens_per_word)
+        or maximum_tokens_per_word <= 0.0
+    ):
+        raise ValueError("tokenizer.max_tokens_per_word must be positive")
+    if (
+        not isinstance(maximum_raw_byte_fraction, (int, float))
+        or isinstance(maximum_raw_byte_fraction, bool)
+        or not 0.0 <= maximum_raw_byte_fraction <= 1.0
+    ):
+        raise ValueError("tokenizer.max_raw_byte_fraction must be in [0, 1]")
     if (
         not isinstance(minimum_unicode, (int, float))
         or isinstance(minimum_unicode, bool)
@@ -537,6 +554,17 @@ def _validate_tokenizer_reports(
         if report.compression_ratio > float(maximum):
             failures.append(
                 f"{split} tokens/byte {report.compression_ratio:.3f} exceeds {maximum}"
+            )
+        if report.tokens_per_word > float(maximum_tokens_per_word):
+            failures.append(
+                f"{split} tokens/word {report.tokens_per_word:.3f} exceeds "
+                f"{maximum_tokens_per_word}"
+            )
+        raw_byte_fraction = report.raw_byte_tokens / max(1, report.tokens)
+        if raw_byte_fraction > float(maximum_raw_byte_fraction):
+            failures.append(
+                f"{split} raw-byte fraction {raw_byte_fraction:.1%} exceeds "
+                f"{float(maximum_raw_byte_fraction):.1%}"
             )
         if report.unicode_atomic_coverage < float(minimum_unicode):
             failures.append(
@@ -1019,6 +1047,10 @@ def train_pipeline(
                 "checkpoint": str(resume) if resume is not None else None,
             },
         )
+        gc.collect()
+        active_backend = get_backend()
+        if hasattr(active_backend, "empty_cache"):
+            active_backend.empty_cache()
         result = train_model(
             config,
             base_dir=stage.config_path.parent,

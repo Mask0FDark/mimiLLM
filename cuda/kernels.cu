@@ -16,6 +16,36 @@ extern "C" __global__ void mimillm_add(
     if (index < count) output[index] = left[index] + right[index];
 }
 
+extern "C" __global__ void mimillm_add_row_vector(
+    const float* values, const float* bias, float* output,
+    std::int64_t count, std::int64_t columns
+) {
+    const auto index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < count) output[index] = values[index] + bias[index % columns];
+}
+
+extern "C" __global__ void mimillm_sum_columns(
+    const float* values, float* output, std::int64_t rows, std::int64_t columns
+) {
+    extern __shared__ float partial[];
+    const auto column = static_cast<std::int64_t>(blockIdx.x);
+    float local = 0.0f;
+    for (
+        auto row = static_cast<std::int64_t>(threadIdx.x);
+        row < rows;
+        row += blockDim.x
+    ) {
+        local += values[row * columns + column];
+    }
+    partial[threadIdx.x] = local;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) output[column] = partial[0];
+}
+
 extern "C" __global__ void mimillm_multiply(
     const float* left, const float* right, float* output, std::int64_t count
 ) {
@@ -159,6 +189,51 @@ extern "C" __global__ void mimillm_softmax_rows(
     }
 }
 
+extern "C" __global__ void mimillm_causal_softmax_rows(
+    const float* input, float* output, std::int64_t rows,
+    std::int64_t columns, std::int64_t sequence_length, float scale
+) {
+    const auto row = static_cast<std::int64_t>(blockIdx.x);
+    if (row >= rows) return;
+    const auto query = row % sequence_length;
+    extern __shared__ float shared[];
+    float local_max = -3.402823466e+38F;
+    for (std::int64_t column = threadIdx.x; column < columns; column += blockDim.x) {
+        if (column <= query) {
+            local_max = fmaxf(local_max, input[row * columns + column] * scale);
+        }
+    }
+    shared[threadIdx.x] = local_max;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride; stride /= 2) {
+        if (threadIdx.x < stride) {
+            shared[threadIdx.x] = fmaxf(
+                shared[threadIdx.x], shared[threadIdx.x + stride]
+            );
+        }
+        __syncthreads();
+    }
+    const float maximum = shared[0];
+    float local_sum = 0.0F;
+    for (std::int64_t column = threadIdx.x; column < columns; column += blockDim.x) {
+        if (column <= query) {
+            local_sum += expf(input[row * columns + column] * scale - maximum);
+        }
+    }
+    shared[threadIdx.x] = local_sum;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride; stride /= 2) {
+        if (threadIdx.x < stride) shared[threadIdx.x] += shared[threadIdx.x + stride];
+        __syncthreads();
+    }
+    const float denominator = shared[0];
+    for (std::int64_t column = threadIdx.x; column < columns; column += blockDim.x) {
+        output[row * columns + column] = column <= query
+            ? expf(input[row * columns + column] * scale - maximum) / denominator
+            : 0.0F;
+    }
+}
+
 extern "C" __global__ void mimillm_softmax_backward(
     const float* output, const float* grad_output, float* grad_input,
     std::int64_t rows, std::int64_t columns
@@ -181,6 +256,100 @@ extern "C" __global__ void mimillm_softmax_backward(
     for (std::int64_t column = threadIdx.x; column < columns; column += blockDim.x) {
         const auto index = row * columns + column;
         grad_input[index] = output[index] * (grad_output[index] - dot);
+    }
+}
+
+extern "C" __global__ void mimillm_causal_softmax_backward(
+    const float* output, const float* grad_output, float* grad_input,
+    std::int64_t rows, std::int64_t columns, float scale
+) {
+    const auto row = static_cast<std::int64_t>(blockIdx.x);
+    if (row >= rows) return;
+    extern __shared__ float shared[];
+    float local_dot = 0.0F;
+    for (std::int64_t column = threadIdx.x; column < columns; column += blockDim.x) {
+        const auto index = row * columns + column;
+        local_dot += output[index] * grad_output[index];
+    }
+    shared[threadIdx.x] = local_dot;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride; stride /= 2) {
+        if (threadIdx.x < stride) shared[threadIdx.x] += shared[threadIdx.x + stride];
+        __syncthreads();
+    }
+    const float dot = shared[0];
+    for (std::int64_t column = threadIdx.x; column < columns; column += blockDim.x) {
+        const auto index = row * columns + column;
+        grad_input[index] = scale * output[index] * (grad_output[index] - dot);
+    }
+}
+
+extern "C" __global__ void mimillm_rms_norm(
+    const float* input, const float* weight, float* output,
+    std::int64_t rows, std::int64_t columns, float epsilon
+) {
+    const auto row = static_cast<std::int64_t>(blockIdx.x);
+    if (row >= rows) return;
+    extern __shared__ float partial[];
+    float local_square_sum = 0.0F;
+    for (std::int64_t column = threadIdx.x; column < columns; column += blockDim.x) {
+        const float value = input[row * columns + column];
+        local_square_sum += value * value;
+    }
+    partial[threadIdx.x] = local_square_sum;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride; stride /= 2) {
+        if (threadIdx.x < stride) partial[threadIdx.x] += partial[threadIdx.x + stride];
+        __syncthreads();
+    }
+    const float inverse_rms = rsqrtf(partial[0] / static_cast<float>(columns) + epsilon);
+    for (std::int64_t column = threadIdx.x; column < columns; column += blockDim.x) {
+        const auto index = row * columns + column;
+        output[index] = input[index] * weight[column] * inverse_rms;
+    }
+}
+
+extern "C" __global__ void mimillm_rms_norm_backward(
+    const float* input, const float* weight, const float* grad_output,
+    float* grad_input, float* grad_weight,
+    std::int64_t rows, std::int64_t columns, float epsilon
+) {
+    const auto row = static_cast<std::int64_t>(blockIdx.x);
+    if (row >= rows) return;
+    extern __shared__ float shared[];
+    float* square_partial = shared;
+    float* dot_partial = shared + blockDim.x;
+    float local_square_sum = 0.0F;
+    float local_dot = 0.0F;
+    for (std::int64_t column = threadIdx.x; column < columns; column += blockDim.x) {
+        const auto index = row * columns + column;
+        const float value = input[index];
+        local_square_sum += value * value;
+        local_dot += grad_output[index] * weight[column] * value;
+    }
+    square_partial[threadIdx.x] = local_square_sum;
+    dot_partial[threadIdx.x] = local_dot;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride; stride /= 2) {
+        if (threadIdx.x < stride) {
+            square_partial[threadIdx.x] += square_partial[threadIdx.x + stride];
+            dot_partial[threadIdx.x] += dot_partial[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    const float inverse_rms = rsqrtf(
+        square_partial[0] / static_cast<float>(columns) + epsilon
+    );
+    const float correction = (
+        dot_partial[0] * inverse_rms * inverse_rms * inverse_rms
+        / static_cast<float>(columns)
+    );
+    for (std::int64_t column = threadIdx.x; column < columns; column += blockDim.x) {
+        const auto index = row * columns + column;
+        const float value = input[index];
+        const float upstream = grad_output[index];
+        grad_input[index] = upstream * weight[column] * inverse_rms - value * correction;
+        atomicAdd(grad_weight + column, upstream * value * inverse_rms);
     }
 }
 

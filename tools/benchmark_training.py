@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 from mimillm.backend import get_backend, reset_backend
 from mimillm.optim import AdamW
+from mimillm.tokenizer import BpeTokenizer
 from mimillm.transformer import DecoderTransformer, TransformerConfig
 from mimillm.utils import flatten
 
@@ -42,6 +43,8 @@ def _training_state(
     *,
     backend: str = "python",
     seed: int = 42,
+    vocab_size: int = 260,
+    tokenizer_model_path: str | None = None,
     context_length: int = 16,
     d_model: int = 16,
     n_layers: int = 1,
@@ -56,6 +59,8 @@ def _training_state(
     reset_backend()
     selected_backend = get_backend()
     config = TransformerConfig(
+        vocab_size=vocab_size,
+        tokenizer="byte" if vocab_size == 260 else "bpe",
         context_length=context_length,
         d_model=d_model,
         n_layers=n_layers,
@@ -70,7 +75,12 @@ def _training_state(
         checkpoint_interval=1,
         seed=seed,
     )
-    model = DecoderTransformer(config)
+    tokenizer_model = (
+        BpeTokenizer.load(tokenizer_model_path)
+        if tokenizer_model_path is not None
+        else None
+    )
+    model = DecoderTransformer(config, tokenizer_model=tokenizer_model)
     optimizer = AdamW(model.parameters(), config.learning_rate, weight_decay=0.0)
     inputs, targets = synthetic_batch(config, seed=seed + 1)
     return selected_backend, config, model, optimizer, inputs, targets
@@ -85,13 +95,25 @@ def _training_step(
     targets: list[list[int]],
 ) -> dict[str, Any]:
     started = time.perf_counter()
+    forward_started = started
     logits = model(inputs)
+    forward_seconds = time.perf_counter() - forward_started
+    loss_started = time.perf_counter()
     loss = logits.reshape(-1, config.vocab_size).cross_entropy(flatten(targets))
     loss_value = loss.item()
+    loss_seconds = time.perf_counter() - loss_started
+    backward_started = time.perf_counter()
     loss.backward()
+    backward_seconds = time.perf_counter() - backward_started
+    clipping_started = time.perf_counter()
     grad_norm = optimizer.clip_grad_norm(1.0)
+    clipping_seconds = time.perf_counter() - clipping_started
+    optimizer_started = time.perf_counter()
     optimizer.step()
+    optimizer_seconds = time.perf_counter() - optimizer_started
+    zero_grad_started = time.perf_counter()
     optimizer.zero_grad()
+    zero_grad_seconds = time.perf_counter() - zero_grad_started
     elapsed = time.perf_counter() - started
     checksum = sum(sum(parameter.data) for parameter in model.parameters())
     tokens = sum(len(row) for row in inputs)
@@ -104,6 +126,14 @@ def _training_step(
         "grad_norm": grad_norm,
         "parameter_checksum": checksum,
         "parameters": model.parameter_count(),
+        "phases_seconds": {
+            "forward": forward_seconds,
+            "loss": loss_seconds,
+            "backward": backward_seconds,
+            "clipping": clipping_seconds,
+            "optimizer": optimizer_seconds,
+            "zero_grad": zero_grad_seconds,
+        },
     }
 
 
@@ -145,8 +175,18 @@ def benchmark_training_step(
     results = [_training_step(*state) for _ in range(repeats)]
     best = min(results, key=lambda item: item["seconds"])
     seconds = [item["seconds"] for item in results]
+    phase_names = tuple(results[0]["phases_seconds"])
+    mean_phases = {
+        name: statistics.mean(item["phases_seconds"][name] for item in results)
+        for name in phase_names
+    }
     mean_seconds = statistics.mean(seconds)
     median_seconds = statistics.median(seconds)
+    memory_stats = (
+        state[0].memory_stats()
+        if hasattr(state[0], "memory_stats")
+        else None
+    )
     return {
         **best,
         "repeats": repeats,
@@ -156,6 +196,12 @@ def benchmark_training_step(
         "median_seconds": median_seconds,
         "mean_tokens_per_second": best["tokens"] / mean_seconds,
         "median_tokens_per_second": best["tokens"] / median_seconds,
+        "mean_phases_seconds": mean_phases,
+        "mean_phases_percent": {
+            name: seconds_value / mean_seconds * 100.0
+            for name, seconds_value in mean_phases.items()
+        },
+        "memory_stats": memory_stats,
         "samples_seconds": seconds,
     }
 
@@ -166,6 +212,8 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--context-length", type=int, default=64)
+    parser.add_argument("--vocab-size", type=int, default=260)
+    parser.add_argument("--tokenizer-model")
     parser.add_argument("--d-model", type=int, default=64)
     parser.add_argument("--n-layers", type=int, default=2)
     parser.add_argument("--n-heads", type=int, default=4)
@@ -176,6 +224,8 @@ def main() -> None:
         backend=args.backend,
         repeats=args.repeats,
         warmup=args.warmup,
+        vocab_size=args.vocab_size,
+        tokenizer_model_path=args.tokenizer_model,
         context_length=args.context_length,
         d_model=args.d_model,
         n_layers=args.n_layers,

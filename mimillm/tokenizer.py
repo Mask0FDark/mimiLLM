@@ -125,6 +125,32 @@ def format_qa_text(question: str, answer: str | None = None) -> str:
     return f"{prompt} {answer.strip()}"
 
 
+def format_dialogue_prompt(
+    history: Iterable[tuple[str, str]], question: str,
+) -> str:
+    """Serialize prior user/assistant turns into one canonical QA question."""
+    if isinstance(history, (str, bytes)):
+        raise TypeError("history must contain (question, answer) pairs")
+    if not isinstance(question, str):
+        raise TypeError("question must be a string")
+    parts: list[str] = []
+    for index, pair in enumerate(history):
+        if (
+            not isinstance(pair, (tuple, list))
+            or len(pair) != 2
+            or not all(isinstance(value, str) for value in pair)
+        ):
+            raise TypeError(
+                f"history item {index} must be a (question, answer) string pair"
+            )
+        old_question, old_answer = pair
+        parts.append(
+            f"{old_question.strip()}\nОтвет: {old_answer.strip()}\n\nВопрос: "
+        )
+    parts.append(question.strip())
+    return "".join(parts)
+
+
 class ByteTokenizer:
     """Кодирует текст байтами UTF-8 и четырьмя специальными токенами."""
 

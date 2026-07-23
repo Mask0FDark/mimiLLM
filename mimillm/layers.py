@@ -88,8 +88,7 @@ class RMSNorm(Module):
             raise ValueError(
                 f"RMSNorm ожидал последнюю ось {self.dimension}, получена {inputs.shape}"
             )
-        inverse_rms = ((inputs * inputs).mean(axis=-1, keepdims=True) + self.epsilon).sqrt()
-        return (inputs / inverse_rms) * self.weight
+        return inputs.rms_norm(self.weight, epsilon=self.epsilon)
 
 
 class FeedForward(Module):

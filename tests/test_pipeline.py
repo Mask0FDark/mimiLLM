@@ -15,8 +15,10 @@ from mimillm.pipeline import (
     PipelineStage,
     _evaluate_generation_candidates,
     _tokenizer_settings,
+    _validate_tokenizer_reports,
     train_pipeline,
 )
+from mimillm.tokenizer import BpeTokenizer, TokenizerReport
 from mimillm.training import TrainingResult
 from mimillm.transformer import DecoderTransformer, TransformerConfig
 
@@ -66,6 +68,68 @@ class PipelineTests(unittest.TestCase):
                     "required_pieces": ["model-name"],
                 },
             })
+
+    def test_tokenizer_gate_rejects_fragmented_validation_words(self) -> None:
+        report = TokenizerReport(
+            documents=1,
+            characters=20,
+            words=2,
+            utf8_bytes=30,
+            tokens=14,
+            unique_tokens=8,
+            vocab_size=260,
+            raw_byte_tokens=4,
+            non_ascii_byte_tokens=0,
+            roundtrip_errors=0,
+            replacement_characters=0,
+            compression_ratio=14 / 30,
+            tokens_per_word=7.0,
+            vocab_utilization=8 / 260,
+            unicode_atomic_coverage=1.0,
+            warnings=(),
+        )
+        pipeline = {
+            "tokenizer": {
+                "type": "bpe",
+                "max_tokens_per_word": 4.0,
+                "max_raw_byte_fraction": 0.5,
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "tokens/word"):
+            _validate_tokenizer_reports(
+                pipeline, BpeTokenizer([]), {"validation": report},
+            )
+
+    def test_tokenizer_gate_rejects_excessive_byte_fallback(self) -> None:
+        report = TokenizerReport(
+            documents=1,
+            characters=20,
+            words=5,
+            utf8_bytes=30,
+            tokens=15,
+            unique_tokens=8,
+            vocab_size=260,
+            raw_byte_tokens=12,
+            non_ascii_byte_tokens=0,
+            roundtrip_errors=0,
+            replacement_characters=0,
+            compression_ratio=0.5,
+            tokens_per_word=3.0,
+            vocab_utilization=8 / 260,
+            unicode_atomic_coverage=1.0,
+            warnings=(),
+        )
+        pipeline = {
+            "tokenizer": {
+                "type": "bpe",
+                "max_tokens_per_word": 4.0,
+                "max_raw_byte_fraction": 0.5,
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "raw-byte fraction"):
+            _validate_tokenizer_reports(
+                pipeline, BpeTokenizer([]), {"validation": report},
+            )
 
     def setUp(self) -> None:
         self.previous_backend = os.environ.get("MIMILLM_BACKEND")

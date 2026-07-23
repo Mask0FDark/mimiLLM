@@ -32,14 +32,21 @@ class Optimizer:
         from .backend import get_backend
 
         selected_backend = get_backend()
-        native_reduction = hasattr(selected_backend, "sum_squares")
-        squared = 0.0
-        for parameter in self.parameters:
-            if parameter.grad is not None:
+        gradients = [
+            parameter.grad
+            for parameter in self.parameters
+            if parameter.grad is not None
+        ]
+        if hasattr(selected_backend, "global_sum_squares"):
+            squared = selected_backend.global_sum_squares(gradients)
+        else:
+            native_reduction = hasattr(selected_backend, "sum_squares")
+            squared = 0.0
+            for gradient in gradients:
                 squared += (
-                    selected_backend.sum_squares(parameter.grad)
+                    selected_backend.sum_squares(gradient)
                     if native_reduction
-                    else sum(float(value) * value for value in parameter.grad)
+                    else sum(float(value) * value for value in gradient)
                 )
         norm = math.sqrt(squared)
         if norm > max_norm:
@@ -97,6 +104,28 @@ class AdamW(Optimizer):
         self.step_count = 0
         self.first_moments = [array("f", [0.0]) * parameter.numel for parameter in self.parameters]
         self.second_moments = [array("f", [0.0]) * parameter.numel for parameter in self.parameters]
+        self._register_native_state()
+
+    def _register_native_state(self) -> None:
+        from .backend import get_backend
+
+        selected_backend = get_backend()
+        if hasattr(selected_backend, "prepare_optimizer_state"):
+            parameters, first, second = selected_backend.prepare_optimizer_state(
+                [parameter.data for parameter in self.parameters],
+                self.first_moments,
+                self.second_moments,
+            )
+            for parameter, storage in zip(self.parameters, parameters):
+                parameter.data = storage
+            self.first_moments = first
+            self.second_moments = second
+        elif hasattr(selected_backend, "register_optimizer_state"):
+            selected_backend.register_optimizer_state(
+                [parameter.data for parameter in self.parameters],
+                self.first_moments,
+                self.second_moments,
+            )
 
     def step(self) -> None:
         self.step_count += 1
@@ -160,3 +189,4 @@ class AdamW(Optimizer):
         self.step_count = int(state["step_count"])
         self.first_moments = [array("f", values) for values in first]
         self.second_moments = [array("f", values) for values in second]
+        self._register_native_state()

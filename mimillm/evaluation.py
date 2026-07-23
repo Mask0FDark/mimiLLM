@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .generation import answer_question
+from .tokenizer import format_dialogue_prompt
 from .transformer import DecoderTransformer
 
 
@@ -59,10 +60,7 @@ class DialogueEvaluationReport:
 
 
 def _dialogue_question(history: list[tuple[str, str]], question: str) -> str:
-    return "".join(
-        f"{old_question}\nОтвет: {old_answer}\n\nВопрос: "
-        for old_question, old_answer in history
-    ) + question
+    return format_dialogue_prompt(history, question)
 
 
 def _expectation_failures(expectation: dict[str, Any], response: str) -> list[str]:
