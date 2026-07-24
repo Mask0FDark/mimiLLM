@@ -15,6 +15,7 @@ from mimillm.pipeline import (
     PipelineStage,
     _evaluate_generation_candidates,
     _tokenizer_settings,
+    _validate_stage,
     _validate_tokenizer_reports,
     train_pipeline,
 )
@@ -60,6 +61,18 @@ def _config(*, text_ratio: float) -> dict[str, object]:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_sft_stage_allows_explicit_prompt_loss_for_tiny_models(self) -> None:
+        values = _config(text_ratio=0.0)
+        values["qa_prompt_weight"] = 0.1
+        config = TransformerConfig.from_dict(values)
+        stage = PipelineStage(
+            name="assistant",
+            kind="sft",
+            config_path=Path("sft.json"),
+            output_dir=Path("weights"),
+        )
+        _validate_stage(stage, config)
+
     def test_required_pieces_are_only_valid_for_bpe(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires type='bpe'"):
             _tokenizer_settings({

@@ -344,11 +344,6 @@ def _validate_stage(stage: PipelineStage, config: TransformerConfig) -> None:
     if stage.kind == "sft":
         if config.text_ratio >= 1.0:
             raise ValueError(f"stage {stage.name}: sft requires a QA/dialogue source")
-        if config.qa_prompt_weight != 0.0:
-            raise ValueError(
-                f"stage {stage.name}: sft requires qa_prompt_weight=0 so loss "
-                "targets assistant answers rather than memorizing prompts"
-            )
 
 
 def _tokenizer_settings(values: dict[str, Any]) -> dict[str, Any]:

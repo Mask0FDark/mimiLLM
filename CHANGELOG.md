@@ -1,5 +1,29 @@
 # Changelog / История изменений
 
+## 0.10.6 — 2026-07-24
+
+### English
+
+- Staged SFT now permits an explicitly configured non-zero
+  `qa_prompt_weight`. This hybrid objective is useful for very small models
+  that otherwise learn frequent answer prefixes without learning to
+  distinguish request wording. Answer-only SFT with a zero prompt weight
+  remains the default.
+- Added a regression test for tiny-model prompt-loss configurations and
+  documented that the value must be selected with held-out generation checks,
+  not training loss.
+
+### Русский
+
+- Поэтапный SFT теперь разрешает явно заданный ненулевой
+  `qa_prompt_weight`. Гибридный режим обучения полезен очень маленьким моделям,
+  которые иначе запоминают частые начала ответов, но плохо различают
+  формулировки запросов. Answer-only SFT с нулевым весом prompt остаётся
+  значением по умолчанию.
+- Добавлен регрессионный тест конфигурации prompt loss для маленькой модели. В
+  документации отдельно указано, что значение нужно выбирать по независимой
+  генерационной проверке, а не по train loss.
+
 ## 0.10.5 — 2026-07-23
 
 ### English
