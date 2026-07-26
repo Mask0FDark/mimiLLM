@@ -182,6 +182,46 @@ class AdamW(Optimizer):
                     update + self.weight_decay * parameter.data[index]
                 )
 
+    def step_clipped(self, max_norm: float) -> float:
+        """Clip the global gradient norm and apply one AdamW update.
+
+        CUDA backends may fuse the reduction, clipping, and update so the host
+        does not interrupt the device between these operations.
+        """
+        if max_norm <= 0.0:
+            raise ValueError("max_norm must be positive")
+        from .backend import get_backend
+
+        selected_backend = get_backend()
+        active = [
+            (parameter, parameter.grad, first, second)
+            for parameter, first, second in zip(
+                self.parameters, self.first_moments, self.second_moments
+            )
+            if parameter.grad is not None
+        ]
+        fused = getattr(
+            selected_backend, "adamw_update_many_clipped", None,
+        )
+        if callable(fused) and active:
+            self.step_count += 1
+            return float(fused(
+                [item[0].data for item in active],
+                [item[1] for item in active],
+                [item[2] for item in active],
+                [item[3] for item in active],
+                max_norm=max_norm,
+                learning_rate=self.learning_rate,
+                beta1=self.beta1,
+                beta2=self.beta2,
+                epsilon=self.epsilon,
+                weight_decay=self.weight_decay,
+                step=self.step_count,
+            ))
+        norm = self.clip_grad_norm(max_norm)
+        self.step()
+        return norm
+
     def state_dict(self) -> dict[str, object]:
         return {
             "type": "AdamW", "learning_rate": self.learning_rate,

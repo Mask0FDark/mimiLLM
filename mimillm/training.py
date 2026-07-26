@@ -19,7 +19,12 @@ from .backend import get_backend, reset_backend
 from .checkpoint import load_checkpoint, save_checkpoint
 from .dataset import TokenDataset, load_qa_text, load_text_documents
 from .optim import AdamW
-from .static_cuda import StaticCudaTrainer, compile_static_cuda_training
+from .static_cuda import (
+    StaticCudaTrainer,
+    StaticCudaValidator,
+    compile_static_cuda_training,
+    compile_static_cuda_validation,
+)
 from .tensor import no_grad
 from .tokenizer import (
     BpeTokenizer,
@@ -492,31 +497,63 @@ def validation_loss(
 ) -> float:
     """Computes loss over every supervised validation token."""
     total = 0.0
-    with no_grad():
-        for source, weight in dataset.source_weights():
-            source_loss = 0.0
-            source_tokens = 0.0
-            batches = dataset.validation_batch_count(
-                config.batch_size, config.context_length, source=source,
-            )
-            for batch_index, (inputs, targets, loss_weights) in enumerate(
-                dataset.validation_batches(
+    backend = get_backend()
+    use_static_cuda = (
+        getattr(backend, "name", None) == "cuda"
+        and config.cuda_graph_validation
+    )
+    validator: StaticCudaValidator | None = None
+    try:
+        with no_grad():
+            for source, weight in dataset.source_weights():
+                source_loss = 0.0
+                source_tokens = 0.0
+                batches = dataset.validation_batch_count(
                     config.batch_size, config.context_length, source=source,
-                ),
-                1,
-            ):
-                supervised_tokens = sum(sum(row) for row in loss_weights)
-                logits = model(inputs)
-                batch_loss = logits.reshape(-1, config.vocab_size).cross_entropy(
-                    flatten(targets), weights=flatten(loss_weights)  # type: ignore[arg-type]
-                ).item()
-                source_loss += batch_loss * supervised_tokens
-                source_tokens += supervised_tokens
-                if progress_callback is not None:
-                    progress_callback(source, batch_index, batches)
-            if source_tokens <= 0.0:
-                raise ValueError(f"validation source {source!r} has no supervised tokens")
-            total += weight * source_loss / source_tokens
+                )
+                for batch_index, (inputs, targets, loss_weights) in enumerate(
+                    dataset.validation_batches(
+                        config.batch_size, config.context_length, source=source,
+                    ),
+                    1,
+                ):
+                    supervised_tokens = sum(sum(row) for row in loss_weights)
+                    if use_static_cuda:
+                        _pad_static_cuda_batch(
+                            inputs,
+                            targets,
+                            loss_weights,
+                            width=config.context_length,
+                            pad_token=dataset.tokenizer.PAD,
+                            batch_size=config.batch_size,
+                        )
+                        if validator is None:
+                            validator = compile_static_cuda_validation(
+                                model, inputs, targets, loss_weights,
+                            )
+                        batch_loss = validator.evaluate(
+                            inputs, targets, loss_weights,
+                        ).loss
+                    else:
+                        logits = model(inputs)
+                        batch_loss = logits.reshape(
+                            -1, config.vocab_size,
+                        ).cross_entropy(
+                            flatten(targets),
+                            weights=flatten(loss_weights),  # type: ignore[arg-type]
+                        ).item()
+                    source_loss += batch_loss * supervised_tokens
+                    source_tokens += supervised_tokens
+                    if progress_callback is not None:
+                        progress_callback(source, batch_index, batches)
+                if source_tokens <= 0.0:
+                    raise ValueError(
+                        f"validation source {source!r} has no supervised tokens"
+                    )
+                total += weight * source_loss / source_tokens
+    finally:
+        if validator is not None:
+            validator.close()
     return total
 
 
@@ -527,6 +564,7 @@ def _pad_static_cuda_batch(
     *,
     width: int,
     pad_token: int,
+    batch_size: int | None = None,
 ) -> None:
     """Pad a sampled batch to the fixed shape required by CUDA Graph replay."""
     if not (len(inputs) == len(targets) == len(loss_weights)):
@@ -549,6 +587,18 @@ def _pad_static_cuda_batch(
             row_inputs.extend([pad_token] * padding)
             row_targets.extend([pad_token] * padding)
             row_weights.extend([0.0] * padding)
+    if batch_size is not None:
+        if batch_size <= 0:
+            raise ValueError("CUDA Graph batch size must be positive")
+        if len(inputs) > batch_size:
+            raise ValueError(
+                f"CUDA Graph batch has {len(inputs)} rows, maximum is {batch_size}"
+            )
+        missing = batch_size - len(inputs)
+        for _ in range(missing):
+            inputs.append([pad_token] * width)
+            targets.append([pad_token] * width)
+            loss_weights.append([0.0] * width)
 
 
 def train_model(
@@ -853,8 +903,9 @@ def train_model(
                     learning_rate=optimizer.learning_rate,
                     batch_seconds=backward_finished - started,
                 )
-                gradient_norm = optimizer.clip_grad_norm(config.gradient_clip_norm)
-                optimizer.step()
+                gradient_norm = optimizer.step_clipped(
+                    config.gradient_clip_norm
+                )
                 optimizer.zero_grad()
                 optimizer_finished = time.perf_counter()
             last_step = step
@@ -884,6 +935,15 @@ def train_model(
                 or step == config.steps
             )
             if should_validate:
+                if (
+                    static_trainer is not None
+                    and config.cuda_graph_validation
+                ):
+                    # A training graph keeps all backward intermediates alive.
+                    # Release it before capturing the much smaller validation
+                    # graph so both paths also fit on low-memory GPUs.
+                    static_trainer.close()
+                    static_trainer = None
                 progress.update(
                     step,
                     source=train_data.last_source,

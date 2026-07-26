@@ -48,8 +48,11 @@ from .pipeline import PipelineQualityError, PipelineResult, PipelineStage, train
 from .safetensors import load_safetensors, save_safetensors
 from .static_cuda import (
     StaticCudaTrainer,
+    StaticCudaValidator,
     StaticTrainingStepResult,
+    StaticValidationResult,
     compile_static_cuda_training,
+    compile_static_cuda_validation,
 )
 from .tensor import Tensor, is_grad_enabled, no_grad
 from .tokenizer import (
@@ -109,7 +112,9 @@ __all__ = [
     "ReLU",
     "SGD",
     "StaticCudaTrainer",
+    "StaticCudaValidator",
     "StaticTrainingStepResult",
+    "StaticValidationResult",
     "Tensor",
     "TokenDataset",
     "TokenizerReport",
@@ -122,6 +127,7 @@ __all__ = [
     "audit_dataset",
     "create_model",
     "compile_static_cuda_training",
+    "compile_static_cuda_validation",
     "create_tokenizer",
     "cross_entropy",
     "cuda_is_available",
@@ -167,4 +173,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.11.0.dev1"
+__version__ = "0.11.0.dev2"

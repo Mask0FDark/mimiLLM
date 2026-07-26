@@ -598,3 +598,62 @@ extern "C" __global__ void mimillm_multi_tensor_adamw(
     );
     parameter[index] -= learning_rate * update;
 }
+
+extern "C" __global__ void mimillm_compute_clip_scale(
+    const float* squared_norm,
+    float* clip_scale,
+    float max_norm
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    const float norm = sqrtf(fmaxf(squared_norm[0], 0.0F));
+    clip_scale[0] = (
+        norm > max_norm ? max_norm / (norm + 1.0e-12F) : 1.0F
+    );
+}
+
+extern "C" __global__ void mimillm_multi_tensor_adamw_clipped(
+    const unsigned long long* parameter_pointers,
+    const unsigned long long* gradient_pointers,
+    const unsigned long long* first_pointers,
+    const unsigned long long* second_pointers,
+    const std::int64_t* lengths,
+    const std::int64_t* block_offsets,
+    std::int64_t tensor_count,
+    const float* clip_scale,
+    float learning_rate,
+    float beta1,
+    float beta2,
+    float epsilon,
+    float weight_decay,
+    float correction1,
+    float correction2
+) {
+    const auto global_block = static_cast<std::int64_t>(blockIdx.x);
+    const auto tensor = mimillm_tensor_for_block(
+        global_block, block_offsets, tensor_count
+    );
+    const auto local_block = global_block - block_offsets[tensor];
+    const auto index = local_block * blockDim.x + threadIdx.x;
+    if (index >= lengths[tensor]) return;
+    auto parameter = reinterpret_cast<float*>(parameter_pointers[tensor]);
+    const auto gradient = reinterpret_cast<const float*>(
+        gradient_pointers[tensor]
+    );
+    auto first = reinterpret_cast<float*>(first_pointers[tensor]);
+    auto second = reinterpret_cast<float*>(second_pointers[tensor]);
+    const float value = gradient[index] * clip_scale[0];
+    const float first_value = (
+        beta1 * first[index] + (1.0F - beta1) * value
+    );
+    const float second_value = (
+        beta2 * second[index] + (1.0F - beta2) * value * value
+    );
+    first[index] = first_value;
+    second[index] = second_value;
+    const float update = (
+        (first_value / correction1)
+        / (sqrtf(second_value / correction2) + epsilon)
+        + weight_decay * parameter[index]
+    );
+    parameter[index] -= learning_rate * update;
+}

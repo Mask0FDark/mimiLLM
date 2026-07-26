@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import gc
 import os
 import shutil
 import sys
@@ -1010,6 +1011,10 @@ class _CudaRuntime:
         """Capture one allocation-free callback on the backend stream."""
         if self._capturing:
             raise RuntimeError("nested CUDA graph capture is not supported")
+        # Autograd tensors form short-lived reference cycles. Finalizing one
+        # during stream capture can call cuMemFree and invalidate the capture,
+        # so drain unreachable objects before entering the restricted region.
+        gc.collect()
         self.synchronize()
         self._check(
             self.driver.cuStreamBeginCapture_v2(
@@ -1159,8 +1164,9 @@ class CudaBackend:
         pointer = trace.named_pointers.get("loss")
         if pointer is None:
             raise RuntimeError("the static CUDA trace does not contain a loss value")
-        self.runtime.synchronize()
         storage = array("f", [0.0])
+        # cuMemcpyDtoH is synchronous, so an explicit device-wide synchronize
+        # here only adds a second host boundary to every graph replay.
         self.runtime.download(storage, pointer)
         return float(storage[0])
 
@@ -1185,6 +1191,22 @@ class CudaBackend:
         for storage in (*parameters, *first_moments, *second_moments):
             self.runtime.register_persistent(storage)
 
+    def prepare_model_state(
+        self, parameters: Sequence[array],
+    ) -> list[array]:
+        """Create persistent resident mirrors for model-only CUDA execution."""
+        converted: list[array] = []
+        for storage in parameters:
+            if getattr(storage, "_mimillm_cuda_array", False):
+                resident = storage
+            else:
+                resident = _CudaArray("f", storage)
+                resident._host_current = True
+                resident._device_current = False
+            self.runtime.register_persistent(resident)
+            converted.append(resident)
+        return converted
+
     def prepare_optimizer_state(
         self,
         parameters: Sequence[array],
@@ -1192,18 +1214,10 @@ class CudaBackend:
         second_moments: Sequence[array],
     ) -> tuple[list[array], list[array], list[array]]:
         """Create lazily synchronized host mirrors for CUDA optimizer state."""
-        groups: list[list[array]] = []
-        for values in (parameters, first_moments, second_moments):
-            converted: list[array] = []
-            for storage in values:
-                if getattr(storage, "_mimillm_cuda_array", False):
-                    resident = storage
-                else:
-                    resident = _CudaArray("f", storage)
-                    resident._host_current = True
-                    resident._device_current = False
-                converted.append(resident)
-            groups.append(converted)
+        groups = [
+            self.prepare_model_state(values)
+            for values in (parameters, first_moments, second_moments)
+        ]
         prepared = (groups[0], groups[1], groups[2])
         self.register_optimizer_state(*prepared)
         return prepared
@@ -1970,6 +1984,152 @@ class CudaBackend:
                 self.runtime.finish_output(storage, pointer)
             for storage, pointer in zip(second_moments, groups[3]):
                 self.runtime.finish_output(storage, pointer)
+
+    def adamw_update_many_clipped(
+        self,
+        parameters: Sequence[array],
+        gradients: Sequence[Sequence[float]],
+        first_moments: Sequence[array],
+        second_moments: Sequence[array],
+        *,
+        max_norm: float,
+        learning_rate: float,
+        beta1: float,
+        beta2: float,
+        epsilon: float,
+        weight_decay: float,
+        step: int,
+    ) -> float:
+        """Reduce, clip, and update resident AdamW tensors without a host gap."""
+        if max_norm <= 0.0:
+            raise ValueError("max_norm must be positive")
+        count = len(parameters)
+        if not (
+            count == len(gradients) == len(first_moments) == len(second_moments)
+        ):
+            raise ValueError("AdamW multi-tensor groups must have equal lengths")
+        if count == 0:
+            return 0.0
+        gradient_values = [_float_storage(value) for value in gradients]
+        lengths = [len(value) for value in parameters]
+        for index, length in enumerate(lengths):
+            if (
+                len(gradient_values[index]) != length
+                or len(first_moments[index]) != length
+                or len(second_moments[index]) != length
+            ):
+                raise ValueError("AdamW multi-tensor buffer sizes do not match")
+        length_values, offset_values, total_blocks = self._multi_tensor_layout(
+            lengths
+        )
+        if total_blocks == 0:
+            return 0.0
+        specifications: list[tuple[array, str]] = [
+            *((value, "inout") for value in parameters),
+            *((value, "in") for value in gradient_values),
+            *((value, "inout") for value in first_moments),
+            *((value, "inout") for value in second_moments),
+        ]
+        metadata_sizes = (
+            count * 8,
+            count * 8,
+            count * 8,
+            count * 8,
+            count * 8,
+            (count + 1) * 8,
+            total_blocks * 4,
+            total_blocks * 4,
+            4,
+        )
+        with self.runtime.tensor_buffers(
+            *specifications
+        ) as tensor_pointers, self.runtime.buffers(
+            *metadata_sizes
+        ) as metadata:
+            groups = [
+                tensor_pointers[index * count:(index + 1) * count]
+                for index in range(4)
+            ]
+            for pointer, group in zip(metadata[:4], groups):
+                self.runtime.upload(pointer, _uint64_storage(group))
+            self.runtime.upload(metadata[4], length_values)
+            self.runtime.upload(metadata[5], offset_values)
+
+            partial_a, partial_b, clip_scale = metadata[6:9]
+            self.runtime.launch(
+                "mimillm_multi_tensor_sum_squares",
+                (total_blocks, 1, 1),
+                (BLOCK_SIZE, 1, 1),
+                [
+                    self._pointer(metadata[1]),
+                    self._pointer(metadata[4]),
+                    self._pointer(metadata[5]),
+                    self._count(count),
+                    self._pointer(partial_a),
+                ],
+                shared_memory=BLOCK_SIZE * 4,
+            )
+            current = partial_a
+            spare = partial_b
+            remaining = total_blocks
+            while remaining > 1:
+                output_count = (
+                    remaining + 2 * BLOCK_SIZE - 1
+                ) // (2 * BLOCK_SIZE)
+                self.runtime.launch(
+                    "mimillm_reduce_sum",
+                    (output_count, 1, 1),
+                    (BLOCK_SIZE, 1, 1),
+                    [
+                        self._pointer(current),
+                        self._pointer(spare),
+                        self._count(remaining),
+                    ],
+                    shared_memory=BLOCK_SIZE * 4,
+                )
+                current, spare = spare, current
+                remaining = output_count
+            self.runtime.launch(
+                "mimillm_compute_clip_scale",
+                (1, 1, 1),
+                (1, 1, 1),
+                [
+                    self._pointer(current),
+                    self._pointer(clip_scale),
+                    ctypes.c_float(max_norm),
+                ],
+            )
+
+            correction1 = 1.0 - beta1 ** step
+            correction2 = 1.0 - beta2 ** step
+            self.runtime.launch(
+                "mimillm_multi_tensor_adamw_clipped",
+                (total_blocks, 1, 1),
+                (BLOCK_SIZE, 1, 1),
+                [
+                    *(self._pointer(pointer) for pointer in metadata[:4]),
+                    self._pointer(metadata[4]),
+                    self._pointer(metadata[5]),
+                    self._count(count),
+                    self._pointer(clip_scale),
+                    ctypes.c_float(learning_rate),
+                    ctypes.c_float(beta1),
+                    ctypes.c_float(beta2),
+                    ctypes.c_float(epsilon),
+                    ctypes.c_float(weight_decay),
+                    ctypes.c_float(correction1),
+                    ctypes.c_float(correction2),
+                ],
+            )
+            for storage, pointer in zip(parameters, groups[0]):
+                self.runtime.finish_output(storage, pointer)
+            for storage, pointer in zip(first_moments, groups[2]):
+                self.runtime.finish_output(storage, pointer)
+            for storage, pointer in zip(second_moments, groups[3]):
+                self.runtime.finish_output(storage, pointer)
+            squared_norm = array("f", [0.0])
+            self.runtime.download(squared_norm, current)
+        return max(0.0, float(squared_norm[0])) ** 0.5
 
     def adamw_update(
         self, parameter: array, gradient: Sequence[float], first_moment: array,

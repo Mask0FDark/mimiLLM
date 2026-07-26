@@ -30,7 +30,7 @@ class PublicApiTests(unittest.TestCase):
             mimillm.create_model(mimillm.ModelConfig(), d_model=8)
 
     def test_version_and_exports(self) -> None:
-        self.assertEqual(mimillm.__version__, "0.11.0.dev1")
+        self.assertEqual(mimillm.__version__, "0.11.0.dev2")
         for name in (
             "Tensor", "AdamW", "TokenDataset", "create_model", "load_model",
             "save_model", "train_from_config", "CudaBackend", "cuda_is_available",
@@ -45,7 +45,8 @@ class PublicApiTests(unittest.TestCase):
             "save_dialogue_evaluation",
             "run_one_pair_sft_acceptance",
             "StaticCudaTrainer", "StaticTrainingStepResult",
-            "compile_static_cuda_training",
+            "compile_static_cuda_training", "StaticCudaValidator",
+            "StaticValidationResult", "compile_static_cuda_validation",
             "HailoRuntimeInfo", "HailoHefInfo", "hailo_is_available",
             "inspect_hailo_runtime", "inspect_hailo_hef",
         ):

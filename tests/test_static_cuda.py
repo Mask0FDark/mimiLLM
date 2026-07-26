@@ -10,7 +10,10 @@ from pathlib import Path
 from mimillm.backend import get_backend, reset_backend
 from mimillm.backend_cuda import is_available as cuda_is_available
 from mimillm.optim import AdamW
-from mimillm.static_cuda import compile_static_cuda_training
+from mimillm.static_cuda import (
+    compile_static_cuda_training,
+    compile_static_cuda_validation,
+)
 from mimillm.training import train_model
 from mimillm.transformer import DecoderTransformer, TransformerConfig
 from mimillm.utils import flatten
@@ -98,6 +101,46 @@ class StaticCudaTests(unittest.TestCase):
         ]
         self.assertLess(max(differences), 2e-4)
         self.assertLess(sum(differences) / len(differences), 2e-7)
+
+    def test_dynamic_validation_batches_match_eager_loss(self) -> None:
+        config = TransformerConfig(
+            context_length=8,
+            d_model=16,
+            n_layers=1,
+            n_heads=2,
+            d_mlp=32,
+            batch_size=2,
+            steps=1,
+            validation_interval=1,
+            checkpoint_interval=1,
+            seed=42,
+        )
+        model = DecoderTransformer(config)
+        batches = (
+            (
+                [[257, 1, 2, 3, 4, 5, 6, 7], [257, 8, 9, 10, 11, 12, 13, 14]],
+                [[1, 2, 3, 4, 5, 6, 7, 258], [8, 9, 10, 11, 12, 13, 14, 258]],
+                [[0, 0, 1, 1, 1, 1, 1, 1], [0, 0, 0, 1, 1, 1, 1, 1]],
+            ),
+            (
+                [[257, 20, 21, 22, 23, 24, 25, 26], [257, 30, 31, 32, 33, 34, 35, 36]],
+                [[20, 21, 22, 23, 24, 25, 26, 258], [30, 31, 32, 33, 34, 35, 36, 258]],
+                [[0, 0, 0, 0, 1, 1, 1, 1], [0, 0, 1, 1, 1, 1, 1, 1]],
+            ),
+        )
+        validator = compile_static_cuda_validation(model, *batches[0])
+        try:
+            for inputs, targets, weights in batches:
+                expected = model(inputs).reshape(
+                    -1, config.vocab_size,
+                ).cross_entropy(
+                    flatten(targets), weights=flatten(weights),
+                ).item()
+                actual = validator.evaluate(inputs, targets, weights)
+                self.assertAlmostEqual(actual.loss, expected, places=5)
+                self.assertEqual(actual.tokens, 16)
+        finally:
+            validator.close()
 
     def test_train_model_pads_short_batches_for_graph_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -592,6 +592,7 @@ python tools/benchmark_training.py --backend cuda --repeats 9 --warmup 3
 ```json
 {
   "cuda_graph_training": true,
+  "cuda_graph_validation": true,
   "cuda_tf32": true
 }
 ```
@@ -601,6 +602,17 @@ batch, после чего следующие шаги повторяют уже
 target и масками answer-only SFT. Learning rate, gradient clipping и AdamW
 остаются динамическими, а формат весов и checkpoint не меняется. Режим не
 использует PyTorch, NumPy, CuPy или другой ML runtime.
+
+При `cuda_graph_validation: true` валидация также записывает отдельный
+fixed-shape CUDA Graph и повторяет его для всех validation batch. Неполный
+последний batch дополняется PAD-токенами с нулевым весом loss. Перед
+валидацией training graph освобождается, поэтому оба графа не занимают VRAM
+одновременно. На следующем шаге обучения training graph создаётся заново.
+
+Общая норма градиента, clipping и AdamW выполняются одной очередью CUDA без
+промежуточного ожидания CPU. Математический результат совпадает с раздельными
+операциями: AdamW получает те же clipped gradients, а checkpoint и resume не
+меняются.
 
 `cuda_tf32` разрешает cuBLAS использовать TF32 Tensor Cores видеокарт Ampere и
 новее для FP32 matmul. Данные модели, результаты matmul, накопление, AdamW и
@@ -614,11 +626,16 @@ CUDA Graph требует одинаковых `batch_size` и `context_length` 
 недостаточно или нужно сравнить скорость с обычным CUDA-выполнением, установите
 `"cuda_graph_training": false`.
 
+Чтобы отключить только статическую валидацию, оставив ускоренное обучение,
+укажите `"cuda_graph_validation": false`.
+
 Отдельный замер статического пути:
 
 ```powershell
 python tools/benchmark_static_cuda.py --tokenizer-model path\to\tokenizer.json
 python tools/benchmark_static_cuda.py --tokenizer-model path\to\tokenizer.json --no-cuda-tf32
+python tools/benchmark_validation.py path\to\weights --base-dir path\to\project
+python tools/benchmark_validation.py path\to\weights --base-dir path\to\project --eager
 ```
 
 В чередующихся замерах на RTX 3050 Laptop GPU модель с 1 500 604 параметрами,
@@ -626,6 +643,12 @@ python tools/benchmark_static_cuda.py --tokenizer-model path\to\tokenizer.json -
 75 248 токенов/с в точном FP32 и 87 506 токенов/с с TF32. Прирост TF32 —
 16,3%, а ускорение относительно eager CUDA — 16,6 раза. Результат зависит от
 GPU, размеров модели, batch и состояния охлаждения.
+
+На том же GPU валидация 138 813 обучаемых токенов модели с 1 500 604
+параметрами заняла 25,04 с в eager CUDA и медиану 1,64 с через CUDA Graph:
+ускорение примерно в 15,2 раза. После объединения clipping и AdamW
+контролируемая скорость обучения выросла с 87 506 до 91 369 токенов/с
+(ещё 4,4%).
 
 ### C++ и Python
 
@@ -1050,6 +1073,7 @@ CUDA training uses a fixed-shape CUDA Graph by default:
 ```json
 {
   "cuda_graph_training": true,
+  "cuda_graph_validation": true,
   "cuda_tf32": true
 }
 ```
@@ -1059,6 +1083,16 @@ batch. Later steps replay the captured graph with new token IDs, targets, and
 answer-only SFT masks. Learning-rate schedules, gradient clipping, and AdamW
 remain dynamic, while weight and checkpoint formats remain unchanged. This
 path does not use PyTorch, NumPy, CuPy, or another ML runtime.
+
+With `cuda_graph_validation: true`, validation records its own fixed-shape
+CUDA Graph and replays it across all validation batches. A partial final batch
+is padded with zero-loss PAD tokens. The training graph is released before
+validation so both graphs do not occupy VRAM at once, then it is rebuilt on
+the next training step.
+
+Global gradient norm reduction, clipping, and AdamW run as one CUDA queue
+without a host synchronization between them. AdamW receives the same clipped
+gradients and checkpoint/resume formats are unchanged.
 
 `cuda_tf32` allows cuBLAS to use TF32 Tensor Cores on Ampere and newer GPUs
 for FP32 matmul. Model data, matmul outputs, accumulation, AdamW state, and
@@ -1072,11 +1106,16 @@ pads shorter examples with zero-loss PAD tokens. Set
 `"cuda_graph_training": false` when memory is limited or when comparing
 against eager CUDA.
 
+Set `"cuda_graph_validation": false` to disable only static validation while
+keeping static training enabled.
+
 Run the dedicated benchmark with:
 
 ```bash
 python tools/benchmark_static_cuda.py --tokenizer-model path/to/tokenizer.json
 python tools/benchmark_static_cuda.py --tokenizer-model path/to/tokenizer.json --no-cuda-tf32
+python tools/benchmark_validation.py path/to/weights --base-dir path/to/project
+python tools/benchmark_validation.py path/to/weights --base-dir path/to/project --eager
 ```
 
 In alternating trials on the development RTX 3050 Laptop GPU, a
@@ -1085,6 +1124,12 @@ In alternating trials on the development RTX 3050 Laptop GPU, a
 with TF32. TF32 improved throughput by 16.3% and was 16.6 times the eager CUDA
 path on the same machine. Results vary with GPU, model dimensions, batch size,
 and thermal conditions.
+
+On the same GPU, validation of 138,813 supervised tokens for the
+1,500,604-parameter model took 25.04 seconds with eager CUDA and a
+1.64-second median with CUDA Graph replay, about 15.2 times faster. Fusing
+clipping with AdamW increased the controlled training benchmark from 87,506
+to 91,369 tokens/s, a further 4.4%.
 
 The library has also been tested on a Raspberry Pi 5 running Ubuntu Server
 24.04 arm64. The setup helper creates an isolated venv, installs mimiLLM, and

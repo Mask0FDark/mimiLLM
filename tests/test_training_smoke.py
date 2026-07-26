@@ -51,6 +51,32 @@ class TrainingSmokeTests(unittest.TestCase):
             [0.0, 1.0, 1.0, 0.0],
         ])
 
+    def test_static_cuda_padding_adds_masked_batch_rows(self) -> None:
+        inputs = [[257, 10]]
+        targets = [[10, 258]]
+        weights = [[1.0, 1.0]]
+        _pad_static_cuda_batch(
+            inputs,
+            targets,
+            weights,
+            width=4,
+            pad_token=256,
+            batch_size=3,
+        )
+        self.assertEqual(inputs, [
+            [257, 10, 256, 256],
+            [256, 256, 256, 256],
+            [256, 256, 256, 256],
+        ])
+        self.assertEqual(targets[1:], [
+            [256, 256, 256, 256],
+            [256, 256, 256, 256],
+        ])
+        self.assertEqual(weights[1:], [
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ])
+
     def test_overfit_one_batch_and_resume(self) -> None:
         inputs, targets = [[257, 10, 11, 12]], [10, 11, 12, 258]
         model = DecoderTransformer(self.config)

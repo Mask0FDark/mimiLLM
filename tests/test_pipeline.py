@@ -392,6 +392,7 @@ class PipelineTests(unittest.TestCase):
             old_lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
             old_lineage["effective_config"].pop("cuda_tf32", None)
             old_lineage["effective_config"].pop("cuda_graph_training", None)
+            old_lineage["effective_config"].pop("cuda_graph_validation", None)
             _json(lineage_path, old_lineage)
 
             resumed = train_pipeline(

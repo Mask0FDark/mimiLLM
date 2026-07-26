@@ -357,6 +357,61 @@ class CudaBackendTests(unittest.TestCase):
                 places=5,
             )
 
+        clipped_expected = [
+            array("f", [1.0, -2.0]),
+            array("f", [0.25, 3.0, -4.0]),
+        ]
+        clipped_actual = [
+            array("f", values) for values in clipped_expected
+        ]
+        clipped_first_expected = [
+            array("f", [0.0] * len(values)) for values in clipped_expected
+        ]
+        clipped_second_expected = [
+            array("f", [0.0] * len(values)) for values in clipped_expected
+        ]
+        clipped_first_actual = [
+            array("f", values) for values in clipped_first_expected
+        ]
+        clipped_second_actual = [
+            array("f", values) for values in clipped_second_expected
+        ]
+        expected_norm = sum(
+            value * value for values in gradients for value in values
+        ) ** 0.5
+        max_norm = 0.25
+        scale = max_norm / (expected_norm + 1e-12)
+        scaled_gradients = [
+            array("f", (value * scale for value in values))
+            for values in gradients
+        ]
+        self.cuda.adamw_update_many(
+            clipped_expected,
+            scaled_gradients,
+            clipped_first_expected,
+            clipped_second_expected,
+            **options,
+        )
+        actual_norm = self.cuda.adamw_update_many_clipped(
+            clipped_actual,
+            gradients,
+            clipped_first_actual,
+            clipped_second_actual,
+            max_norm=max_norm,
+            **options,
+        )
+        self.assertAlmostEqual(actual_norm, expected_norm, places=5)
+        for actual, expected in zip(clipped_actual, clipped_expected):
+            self.assertClose(actual, expected, places=5)
+        for actual, expected in zip(
+            clipped_first_actual, clipped_first_expected,
+        ):
+            self.assertClose(actual, expected, places=6)
+        for actual, expected in zip(
+            clipped_second_actual, clipped_second_expected,
+        ):
+            self.assertClose(actual, expected, places=7)
+
     def test_prepared_optimizer_state_is_lazy_and_host_mutations_refresh_device(self) -> None:
         parameters, first, second = self.cuda.prepare_optimizer_state(
             [array("f", [1.0, -2.0])],

@@ -1,6 +1,7 @@
 """Проверки оптимизаторов на простой выпуклой функции."""
 
 import unittest
+from array import array
 
 from mimillm.optim import AdamW, SGD
 from mimillm.parameter import Parameter
@@ -24,6 +25,20 @@ class OptimizerTests(unittest.TestCase):
         original = SGD([value], 0.1).clip_grad_norm(1.0)
         self.assertAlmostEqual(original, 20.0, places=5)
         self.assertAlmostEqual(value.grad[0], 1.0, places=5)  # type: ignore[index]
+
+    def test_adamw_step_clipped_matches_explicit_clip_and_step(self) -> None:
+        left = Parameter([1.0, -2.0])
+        right = Parameter([1.0, -2.0])
+        left.grad = array("f", [3.0, 4.0])
+        right.grad = array("f", [3.0, 4.0])
+        explicit = AdamW([left], learning_rate=0.01, weight_decay=0.0)
+        combined = AdamW([right], learning_rate=0.01, weight_decay=0.0)
+        expected_norm = explicit.clip_grad_norm(1.0)
+        explicit.step()
+        actual_norm = combined.step_clipped(1.0)
+        self.assertAlmostEqual(actual_norm, expected_norm)
+        for actual, expected in zip(right.data, left.data):
+            self.assertAlmostEqual(actual, expected, places=6)
 
     def test_adamw_decreases_quadratic_and_restores_state(self) -> None:
         value = Parameter([5.0], ())

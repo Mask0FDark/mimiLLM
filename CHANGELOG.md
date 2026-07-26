@@ -1,5 +1,52 @@
 # Changelog / История изменений
 
+## 0.11.0-dev.2 — 2026-07-27
+
+### English
+
+- CUDA validation now records a fixed-shape forward and weighted-loss CUDA
+  Graph and replays it for every validation batch. Short sequences and the
+  final partial batch are padded with zero loss weight, so the reported loss
+  keeps the same meaning.
+- The training graph is released before validation and rebuilt on the next
+  training step. This prevents simultaneous training and validation graphs
+  from exhausting VRAM on smaller GPUs.
+- Added a fused CUDA AdamW path that calculates the global gradient norm,
+  applies clipping, and updates every parameter without returning control to
+  the host between those operations.
+- Removed a redundant device-wide synchronization before reading a captured
+  loss and made CUDA Graph capture drain unreachable autograd cycles first.
+- Added `StaticCudaValidator`, `compile_static_cuda_validation`,
+  `cuda_graph_validation`, and `tools/benchmark_validation.py`.
+- On the development RTX 3050 Laptop GPU, validation of 138,813 supervised
+  tokens from the 1,500,604-parameter test model improved from 25.04 seconds
+  to a 1.64-second median (about 15.2 times faster). The same controlled
+  training benchmark improved from 87,506 to 91,369 tokens/s (4.4%).
+  Results depend on the model, corpus, GPU, and thermal state.
+
+### Русский
+
+- CUDA-валидация теперь один раз записывает forward и weighted loss с
+  фиксированной формой в CUDA Graph, после чего повторяет граф для каждого
+  validation batch. Короткие последовательности и последний неполный batch
+  дополняются токенами с нулевым весом loss, поэтому смысл итогового loss не
+  меняется.
+- Перед валидацией training graph освобождается и заново создаётся на
+  следующем шаге обучения. Это не позволяет двум графам одновременно занять
+  всю VRAM на видеокартах с небольшим объёмом памяти.
+- Добавлен слитый CUDA-путь AdamW: общая норма градиента, clipping и обновление
+  всех параметров выполняются без возврата управления на CPU между этими
+  операциями.
+- Убрана лишняя полная синхронизация перед чтением loss из записанного графа.
+  Перед началом CUDA Graph capture также очищаются недостижимые циклы autograd.
+- Добавлены `StaticCudaValidator`, `compile_static_cuda_validation`,
+  `cuda_graph_validation` и `tools/benchmark_validation.py`.
+- На RTX 3050 Laptop GPU валидация 138 813 обучаемых токенов модели с
+  1 500 604 параметрами ускорилась с 25,04 с до медианы 1,64 с — примерно в
+  15,2 раза. Тот же контролируемый бенчмарк обучения ускорился с 87 506 до
+  91 369 токенов/с — на 4,4%. Результат зависит от модели, корпуса, GPU и
+  температурного режима.
+
 ## 0.11.0-dev.1 — 2026-07-26
 
 ### English
