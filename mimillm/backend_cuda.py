@@ -24,6 +24,7 @@ DEFAULT_POOL_BLOCKS_PER_SIZE = 2
 CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 16
 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75
 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76
+CU_STREAM_CAPTURE_MODE_GLOBAL = 0
 
 
 class _CudaArray(array):
@@ -67,7 +68,203 @@ class _CudaArray(array):
         return super().tobytes()
 
 
+class _StaticStorageTrace:
+    """Keep every captured CUDA operand alive at a stable device address."""
+
+    def __init__(self, runtime: "_CudaRuntime") -> None:
+        self.runtime = runtime
+        self.phase = "idle"
+        self.outputs: list[_CudaArray] = []
+        self.constants: list[_CudaArray] = []
+        self.inputs: dict[str, list[_CudaArray]] = defaultdict(list)
+        self.scratch: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+        self.named_pointers: dict[str, int] = {}
+        self._output_cursor = 0
+        self._constant_cursor = 0
+        self._input_cursors: dict[str, int] = defaultdict(int)
+        self._scratch_cursor = 0
+
+    def _reset_cursors(self) -> None:
+        self._output_cursor = 0
+        self._constant_cursor = 0
+        self._input_cursors.clear()
+        self._scratch_cursor = 0
+
+    @contextmanager
+    def recording(self) -> Iterator["_StaticStorageTrace"]:
+        if self.phase != "idle":
+            raise RuntimeError("a static CUDA trace is already active")
+        self.outputs.clear()
+        self.constants.clear()
+        self.inputs.clear()
+        self.scratch.clear()
+        self.named_pointers.clear()
+        self._reset_cursors()
+        self.phase = "record"
+        global _active_static_trace
+        previous = _active_static_trace
+        _active_static_trace = self
+        try:
+            yield self
+        finally:
+            _active_static_trace = previous
+            self.phase = "idle"
+
+    @contextmanager
+    def reusing(self) -> Iterator["_StaticStorageTrace"]:
+        if self.phase != "idle":
+            raise RuntimeError("a static CUDA trace is already active")
+        self._reset_cursors()
+        self.phase = "reuse"
+        global _active_static_trace
+        previous = _active_static_trace
+        _active_static_trace = self
+        try:
+            yield self
+            if self._output_cursor != len(self.outputs):
+                raise RuntimeError(
+                    "static CUDA output topology changed between preparation and capture"
+                )
+            if self._constant_cursor != len(self.constants):
+                raise RuntimeError(
+                    "static CUDA metadata topology changed between preparation and capture"
+                )
+            if self._scratch_cursor != len(self.scratch):
+                raise RuntimeError(
+                    "static CUDA workspace topology changed between preparation and capture"
+                )
+            for tag, slots in self.inputs.items():
+                if self._input_cursors[tag] != len(slots):
+                    raise RuntimeError(
+                        f"static CUDA input topology changed for {tag!r}"
+                    )
+        finally:
+            _active_static_trace = previous
+            self.phase = "idle"
+
+    def output(self, count: int) -> _CudaArray:
+        if self.phase == "record":
+            storage = _CudaArray("f")
+            storage.frombytes(bytes(count * 4))
+            self.outputs.append(storage)
+            return storage
+        if self.phase == "reuse":
+            if self._output_cursor >= len(self.outputs):
+                raise RuntimeError("static CUDA capture created an unexpected output")
+            storage = self.outputs[self._output_cursor]
+            self._output_cursor += 1
+            if len(storage) != count:
+                raise RuntimeError(
+                    "static CUDA output shape changed between preparation and capture"
+                )
+            return storage
+        raise RuntimeError("static output requested outside an active trace")
+
+    def constant(self, typecode: str, values: Sequence[int]) -> _CudaArray:
+        expected = array(typecode, values)
+        if self.phase == "record":
+            storage = _CudaArray(typecode, expected)
+            self.constants.append(storage)
+            self.runtime.register_persistent(storage)
+            return storage
+        if self.phase == "reuse":
+            if self._constant_cursor >= len(self.constants):
+                raise RuntimeError("static CUDA capture created unexpected metadata")
+            storage = self.constants[self._constant_cursor]
+            self._constant_cursor += 1
+            if storage.typecode != typecode or list(storage) != list(expected):
+                raise RuntimeError(
+                    "static CUDA metadata changed between preparation and capture"
+                )
+            return storage
+        raise RuntimeError("static metadata requested outside an active trace")
+
+    def input(
+        self, typecode: str, values: Sequence[int] | Sequence[float], tag: str,
+    ) -> _CudaArray:
+        if self.phase == "record":
+            storage = _CudaArray(typecode, values)
+            self.inputs[tag].append(storage)
+            self.runtime.register_persistent(storage)
+            return storage
+        if self.phase == "reuse":
+            index = self._input_cursors[tag]
+            slots = self.inputs.get(tag, [])
+            if index >= len(slots):
+                raise RuntimeError(f"static CUDA capture created unexpected input {tag!r}")
+            storage = slots[index]
+            self._input_cursors[tag] += 1
+            expected = array(typecode, values)
+            if storage.typecode != typecode or len(storage) != len(expected):
+                raise RuntimeError(
+                    f"static CUDA input shape changed for {tag!r}"
+                )
+            return storage
+        raise RuntimeError("static input requested outside an active trace")
+
+    def update(
+        self, tag: str, values: Sequence[int] | Sequence[float],
+    ) -> None:
+        slots = self.inputs.get(tag)
+        if not slots:
+            raise KeyError(f"static CUDA input {tag!r} was not captured")
+        for storage in slots:
+            replacement = array(storage.typecode, values)
+            if len(replacement) != len(storage):
+                raise ValueError(
+                    f"static CUDA input {tag!r} expects {len(storage)} values, "
+                    f"received {len(replacement)}"
+                )
+            array.__setitem__(storage, slice(None), replacement)
+            storage._host_current = True
+            storage._device_current = False
+            self.runtime.upload(
+                self.runtime.pointer_for(storage),
+                storage,
+            )
+
+    def buffers(
+        self, sizes: Sequence[int],
+    ) -> tuple[int, ...]:
+        checked = tuple(int(size) for size in sizes)
+        if self.phase == "record":
+            pointers = tuple(self.runtime.allocate(size) for size in checked)
+            self.scratch.append((checked, pointers))
+            return pointers
+        if self.phase == "reuse":
+            if self._scratch_cursor >= len(self.scratch):
+                raise RuntimeError("static CUDA capture created unexpected workspace")
+            expected_sizes, pointers = self.scratch[self._scratch_cursor]
+            self._scratch_cursor += 1
+            if expected_sizes != checked:
+                raise RuntimeError(
+                    "static CUDA workspace sizes changed between preparation and capture"
+                )
+            return pointers
+        raise RuntimeError("static workspace requested outside an active trace")
+
+    def remember_pointer(self, name: str, pointer: int) -> None:
+        previous = self.named_pointers.get(name)
+        if previous is None:
+            self.named_pointers[name] = pointer
+
+    def close(self) -> None:
+        for sizes, pointers in self.scratch:
+            for pointer, size in zip(pointers, sizes):
+                self.runtime.release(pointer, size)
+        self.scratch.clear()
+        self.named_pointers.clear()
+        self.inputs.clear()
+        self.constants.clear()
+        self.outputs.clear()
+
+
+_active_static_trace: _StaticStorageTrace | None = None
+
+
 def _output_storage(count: int) -> _CudaArray:
+    if _active_static_trace is not None:
+        return _active_static_trace.output(count)
     storage = _CudaArray("f")
     storage.frombytes(bytes(count * 4))
     return storage
@@ -114,6 +311,8 @@ def _float_storage(values: Sequence[float]) -> array:
 
 
 def _int32_storage(values: Sequence[int]) -> array:
+    if isinstance(values, array) and values.typecode == "i":
+        return values
     storage = array("i", values)
     if storage.itemsize != 4:
         raise RuntimeError("the platform does not provide a 32-bit array('i')")
@@ -121,9 +320,21 @@ def _int32_storage(values: Sequence[int]) -> array:
 
 
 def _int64_storage(values: Sequence[int]) -> array:
+    if isinstance(values, array) and values.typecode == "q":
+        return values
+    if _active_static_trace is not None:
+        return _active_static_trace.constant("q", values)
     storage = array("q", values)
     if storage.itemsize != 8:
         raise RuntimeError("the platform does not provide a 64-bit array('q')")
+    return storage
+
+
+def _uint64_storage(values: Sequence[int]) -> array:
+    """Store CUDA device pointers in a fixed-width host buffer."""
+    storage = array("Q", values)
+    if storage.itemsize != 8:
+        raise RuntimeError("the platform does not provide a 64-bit array('Q')")
     return storage
 
 
@@ -231,11 +442,15 @@ class _Nvrtc:
 class _Cublas:
     """Minimal cuBLAS wrapper sharing mimiLLM's current Driver API context."""
 
-    def __init__(self) -> None:
+    def __init__(self, stream: int = 0) -> None:
         self.library = self._load_library()
         self._configure()
         self.handle = ctypes.c_void_p()
         self._check(self.library.cublasCreate_v2(ctypes.byref(self.handle)), "cublasCreate")
+        self._check(
+            self.library.cublasSetStream_v2(self.handle, ctypes.c_void_p(stream)),
+            "cublasSetStream",
+        )
 
     @staticmethod
     def _load_library() -> ctypes.CDLL:
@@ -277,6 +492,8 @@ class _Cublas:
         library = self.library
         library.cublasCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
         library.cublasCreate_v2.restype = ctypes.c_int
+        library.cublasSetStream_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        library.cublasSetStream_v2.restype = ctypes.c_int
         library.cublasSgemm_v2.argtypes = [
             ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
             ctypes.c_int, ctypes.c_int, ctypes.c_int,
@@ -371,6 +588,12 @@ class _CudaRuntime:
             ),
             "cuModuleLoadDataEx",
         )
+        self.stream = ctypes.c_void_p()
+        self._check(
+            self.driver.cuStreamCreate(ctypes.byref(self.stream), 0),
+            "cuStreamCreate",
+        )
+        self._capturing = False
         self._functions: dict[str, ctypes.c_void_p] = {}
         self._pool: dict[int, list[int]] = defaultdict(list)
         self._pool_bytes = 0
@@ -396,7 +619,7 @@ class _CudaRuntime:
         self._tensor_cache: dict[int, tuple[weakref.ReferenceType[array], int, int]] = {}
         self._persistent_arrays: set[int] = set()
         try:
-            self.cublas: _Cublas | None = _Cublas()
+            self.cublas: _Cublas | None = _Cublas(int(self.stream.value or 0))
         except (FileNotFoundError, OSError, RuntimeError):
             self.cublas = None
 
@@ -418,8 +641,23 @@ class _CudaRuntime:
         driver.cuMemAlloc_v2.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t]
         driver.cuMemFree_v2.argtypes = [ctypes.c_uint64]
         driver.cuMemsetD8_v2.argtypes = [ctypes.c_uint64, ctypes.c_ubyte, ctypes.c_size_t]
+        driver.cuMemsetD8Async.argtypes = [
+            ctypes.c_uint64, ctypes.c_ubyte, ctypes.c_size_t, ctypes.c_void_p,
+        ]
         driver.cuMemcpyHtoD_v2.argtypes = [ctypes.c_uint64, ctypes.c_void_p, ctypes.c_size_t]
         driver.cuMemcpyDtoH_v2.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_size_t]
+        driver.cuStreamCreate.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint]
+        driver.cuStreamSynchronize.argtypes = [ctypes.c_void_p]
+        driver.cuStreamBeginCapture_v2.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        driver.cuStreamEndCapture.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+        ]
+        driver.cuGraphInstantiateWithFlags.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_ulonglong,
+        ]
+        driver.cuGraphLaunch.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        driver.cuGraphDestroy.argtypes = [ctypes.c_void_p]
+        driver.cuGraphExecDestroy.argtypes = [ctypes.c_void_p]
         driver.cuLaunchKernel.argtypes = [
             ctypes.c_void_p,
             ctypes.c_uint, ctypes.c_uint, ctypes.c_uint,
@@ -587,6 +825,14 @@ class _CudaRuntime:
         self.upload(pointer, storage)
         self._cache_pointer(storage, pointer, size)
 
+    def pointer_for(self, storage: array) -> int:
+        """Return the resident pointer for a live CUDA storage."""
+        size = max(1, len(storage) * storage.itemsize)
+        pointer = self._cached_pointer(storage, size)
+        if pointer is None:
+            raise RuntimeError("CUDA storage is not resident on the device")
+        return pointer
+
     def _take_cached_pointer(self, storage: array, size: int) -> int | None:
         pointer = self._cached_pointer(storage, size)
         if pointer is not None:
@@ -629,6 +875,8 @@ class _CudaRuntime:
                     if mode == "in"
                     else self._cached_pointer(storage, size)
                     if mode == "inout"
+                    else self._cached_pointer(storage, size)
+                    if mode == "out" and _active_static_trace is not None
                     else None
                 )
                 if pointer is None:
@@ -668,6 +916,9 @@ class _CudaRuntime:
 
     @contextmanager
     def buffers(self, *sizes: int) -> Iterator[tuple[int, ...]]:
+        if _active_static_trace is not None:
+            yield _active_static_trace.buffers(sizes)
+            return
         pointers: list[int] = []
         try:
             pointers = [self.allocate(size) for size in sizes]
@@ -718,7 +969,10 @@ class _CudaRuntime:
         storage._host_current = True
 
     def zero(self, pointer: int, size: int) -> None:
-        self._check(self.driver.cuMemsetD8_v2(pointer, 0, size), "cuMemsetD8")
+        self._check(
+            self.driver.cuMemsetD8Async(pointer, 0, size, self.stream),
+            "cuMemsetD8Async",
+        )
 
     def launch(
         self, name: str, grid: tuple[int, int, int], block: tuple[int, int, int],
@@ -729,14 +983,89 @@ class _CudaRuntime:
         ))
         self._check(
             self.driver.cuLaunchKernel(
-                self.function(name), *grid, *block, shared_memory, None, pointers, None,
+                self.function(name), *grid, *block, shared_memory, self.stream, pointers, None,
             ),
             f"cuLaunchKernel({name})",
         )
 
     def synchronize(self) -> None:
         """Wait for queued CUDA work when a host-visible result is not requested."""
-        self._check(self.driver.cuCtxSynchronize(), "cuCtxSynchronize")
+        self._check(self.driver.cuStreamSynchronize(self.stream), "cuStreamSynchronize")
+
+    def capture(self, callback: Any) -> "_CudaGraph":
+        """Capture one allocation-free callback on the backend stream."""
+        if self._capturing:
+            raise RuntimeError("nested CUDA graph capture is not supported")
+        self.synchronize()
+        self._check(
+            self.driver.cuStreamBeginCapture_v2(
+                self.stream, CU_STREAM_CAPTURE_MODE_GLOBAL,
+            ),
+            "cuStreamBeginCapture",
+        )
+        self._capturing = True
+        graph = ctypes.c_void_p()
+        try:
+            callback()
+            self._check(
+                self.driver.cuStreamEndCapture(
+                    self.stream, ctypes.byref(graph),
+                ),
+                "cuStreamEndCapture",
+            )
+        except Exception:
+            if not graph.value:
+                self.driver.cuStreamEndCapture(self.stream, ctypes.byref(graph))
+            if graph.value:
+                self.driver.cuGraphDestroy(graph)
+            raise
+        finally:
+            self._capturing = False
+        executable = ctypes.c_void_p()
+        self._check(
+            self.driver.cuGraphInstantiateWithFlags(
+                ctypes.byref(executable), graph, 0,
+            ),
+            "cuGraphInstantiate",
+        )
+        return _CudaGraph(self, graph, executable)
+
+
+class _CudaGraph:
+    """Instantiated CUDA graph bound to the runtime stream."""
+
+    def __init__(
+        self, runtime: _CudaRuntime, graph: ctypes.c_void_p,
+        executable: ctypes.c_void_p,
+    ) -> None:
+        self.runtime = runtime
+        self.graph = graph
+        self.executable = executable
+        self.closed = False
+
+    def launch(self) -> None:
+        if self.closed:
+            raise RuntimeError("CUDA graph is already closed")
+        self.runtime._check(
+            self.runtime.driver.cuGraphLaunch(
+                self.executable, self.runtime.stream,
+            ),
+            "cuGraphLaunch",
+        )
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.runtime.synchronize()
+        self.runtime._check(
+            self.runtime.driver.cuGraphExecDestroy(self.executable),
+            "cuGraphExecDestroy",
+        )
+        self.runtime._check(
+            self.runtime.driver.cuGraphDestroy(self.graph),
+            "cuGraphDestroy",
+        )
+        self.closed = True
 
 
 _runtime_instance: _CudaRuntime | None = None
@@ -773,6 +1102,39 @@ class CudaBackend:
     @property
     def compiler_info(self) -> str:
         return f"NVRTC CUDA | {self.device_name}"
+
+    def create_static_trace(self) -> _StaticStorageTrace:
+        """Create stable storage bookkeeping for one CUDA graph."""
+        return _StaticStorageTrace(self.runtime)
+
+    def prepare_static_indices(
+        self, values: Sequence[int], tag: str,
+    ) -> Sequence[int]:
+        if _active_static_trace is None:
+            return values
+        return _active_static_trace.input("i", values, tag)
+
+    def prepare_static_floats(
+        self, values: Sequence[float], tag: str,
+    ) -> Sequence[float]:
+        if _active_static_trace is None:
+            return values
+        return _active_static_trace.input("f", values, tag)
+
+    def capture_static(self, callback: Any) -> _CudaGraph:
+        return self.runtime.capture(callback)
+
+    def static_loss(self, trace: _StaticStorageTrace) -> float:
+        pointer = trace.named_pointers.get("loss")
+        if pointer is None:
+            raise RuntimeError("the static CUDA trace does not contain a loss value")
+        self.runtime.synchronize()
+        storage = array("f", [0.0])
+        self.runtime.download(storage, pointer)
+        return float(storage[0])
+
+    def synchronize(self) -> None:
+        self.runtime.synchronize()
 
     @staticmethod
     def _pointer(value: int) -> ctypes.c_uint64:
@@ -935,7 +1297,11 @@ class CudaBackend:
                 (shape_pointer, output_shape_values), (output_stride_pointer, output_strides),
                 (axes_pointer, axes_values),
             ):
-                self.runtime.upload(pointer, storage)
+                if (
+                    _active_static_trace is None
+                    or _active_static_trace.phase == "record"
+                ):
+                    self.runtime.upload(pointer, storage)
             self.runtime.launch(
                 "mimillm_permute", ((count + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1),
                 (BLOCK_SIZE, 1, 1),
@@ -982,7 +1348,11 @@ class CudaBackend:
             *([metadata_size] * 4),
         ) as metadata_pointers:
             for pointer, storage in zip(metadata_pointers, metadata):
-                self.runtime.upload(pointer, storage)
+                if (
+                    _active_static_trace is None
+                    or _active_static_trace.phase == "record"
+                ):
+                    self.runtime.upload(pointer, storage)
             self.runtime.launch(
                 "mimillm_broadcast_binary",
                 ((len(output) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1), (BLOCK_SIZE, 1, 1),
@@ -1016,7 +1386,11 @@ class CudaBackend:
             self.runtime.zero(grad_left_pointer, len(grad_left) * 4)
             self.runtime.zero(grad_right_pointer, len(grad_right) * 4)
             for pointer, storage in zip(metadata_pointers, metadata):
-                self.runtime.upload(pointer, storage)
+                if (
+                    _active_static_trace is None
+                    or _active_static_trace.phase == "record"
+                ):
+                    self.runtime.upload(pointer, storage)
             self.runtime.launch(
                 "mimillm_broadcast_backward",
                 ((len(gradient) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1), (BLOCK_SIZE, 1, 1),
@@ -1439,9 +1813,14 @@ class CudaBackend:
                 )
                 assert output_gradient is not None
                 self.runtime.finish_output(output_gradient, gradient_pointer)
-            loss_storage = array("f", [0.0])
-            self.runtime.download(loss_storage, loss_pointer)
-        return float(loss_storage[0]), output_gradient
+            if _active_static_trace is not None:
+                _active_static_trace.remember_pointer("loss", loss_pointer)
+                loss_value = 0.0
+            else:
+                loss_storage = array("f", [0.0])
+                self.runtime.download(loss_storage, loss_pointer)
+                loss_value = float(loss_storage[0])
+        return loss_value, output_gradient
 
     def cross_entropy(self, logits: Sequence[float], targets: Sequence[int], rows: int, classes: int) -> float:
         return self._cross_entropy(logits, targets, rows, classes, None, gradient=False)[0]
@@ -1461,6 +1840,105 @@ class CudaBackend:
             logits, targets, rows, classes, weights, gradient=compute_gradient,
         )
         return loss, gradient
+
+    @staticmethod
+    def _multi_tensor_layout(
+        lengths: Sequence[int],
+    ) -> tuple[array, array, int]:
+        offsets = [0]
+        for count in lengths:
+            if count < 0:
+                raise ValueError("multi-tensor lengths cannot be negative")
+            offsets.append(
+                offsets[-1] + (count + BLOCK_SIZE - 1) // BLOCK_SIZE
+            )
+        return _int64_storage(lengths), _int64_storage(offsets), offsets[-1]
+
+    def adamw_update_many(
+        self,
+        parameters: Sequence[array],
+        gradients: Sequence[Sequence[float]],
+        first_moments: Sequence[array],
+        second_moments: Sequence[array],
+        *,
+        learning_rate: float,
+        beta1: float,
+        beta2: float,
+        epsilon: float,
+        weight_decay: float,
+        step: int,
+    ) -> None:
+        """Update any number of resident AdamW tensors with one CUDA launch."""
+        count = len(parameters)
+        if not (
+            count == len(gradients) == len(first_moments) == len(second_moments)
+        ):
+            raise ValueError("AdamW multi-tensor groups must have equal lengths")
+        if count == 0:
+            return
+        gradient_values = [_float_storage(value) for value in gradients]
+        lengths = [len(value) for value in parameters]
+        for index, length in enumerate(lengths):
+            if (
+                len(gradient_values[index]) != length
+                or len(first_moments[index]) != length
+                or len(second_moments[index]) != length
+            ):
+                raise ValueError("AdamW multi-tensor buffer sizes do not match")
+        length_values, offset_values, total_blocks = self._multi_tensor_layout(
+            lengths
+        )
+        if total_blocks == 0:
+            return
+        specifications: list[tuple[array, str]] = [
+            *((value, "inout") for value in parameters),
+            *((value, "in") for value in gradient_values),
+            *((value, "inout") for value in first_moments),
+            *((value, "inout") for value in second_moments),
+        ]
+        metadata_sizes = (
+            count * 8, count * 8, count * 8, count * 8,
+            count * 8, (count + 1) * 8,
+        )
+        with self.runtime.tensor_buffers(
+            *specifications
+        ) as tensor_pointers, self.runtime.buffers(
+            *metadata_sizes
+        ) as metadata:
+            groups = [
+                tensor_pointers[index * count:(index + 1) * count]
+                for index in range(4)
+            ]
+            for pointer, group in zip(metadata[:4], groups):
+                self.runtime.upload(pointer, _uint64_storage(group))
+            self.runtime.upload(metadata[4], length_values)
+            self.runtime.upload(metadata[5], offset_values)
+            correction1 = 1.0 - beta1 ** step
+            correction2 = 1.0 - beta2 ** step
+            self.runtime.launch(
+                "mimillm_multi_tensor_adamw",
+                (total_blocks, 1, 1),
+                (BLOCK_SIZE, 1, 1),
+                [
+                    *(self._pointer(pointer) for pointer in metadata[:4]),
+                    self._pointer(metadata[4]),
+                    self._pointer(metadata[5]),
+                    self._count(count),
+                    ctypes.c_float(learning_rate),
+                    ctypes.c_float(beta1),
+                    ctypes.c_float(beta2),
+                    ctypes.c_float(epsilon),
+                    ctypes.c_float(weight_decay),
+                    ctypes.c_float(correction1),
+                    ctypes.c_float(correction2),
+                ],
+            )
+            for storage, pointer in zip(parameters, groups[0]):
+                self.runtime.finish_output(storage, pointer)
+            for storage, pointer in zip(first_moments, groups[2]):
+                self.runtime.finish_output(storage, pointer)
+            for storage, pointer in zip(second_moments, groups[3]):
+                self.runtime.finish_output(storage, pointer)
 
     def adamw_update(
         self, parameter: array, gradient: Sequence[float], first_moment: array,
@@ -1496,37 +1974,107 @@ class CudaBackend:
     def global_sum_squares(
         self, values: Sequence[Sequence[float]],
     ) -> float:
-        """Reduce multiple resident gradients with one host synchronization."""
+        """Reduce all gradients with hierarchical multi-tensor kernels."""
         sources = [_float_storage(source) for source in values if len(source)]
         if not sources:
             return 0.0
-        with self.runtime.buffers(4) as (output_pointer,):
-            self.runtime.zero(output_pointer, 4)
-            for source in sources:
-                with self.runtime.tensor_buffers(
-                    (source, "in"),
-                ) as (source_pointer,):
-                    self.runtime.launch(
-                        "mimillm_sum_squares",
-                        ((len(source) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1),
-                        (BLOCK_SIZE, 1, 1),
-                        [
-                            self._pointer(source_pointer),
-                            self._pointer(output_pointer),
-                            self._count(len(source)),
-                        ],
-                    )
+        lengths = [len(source) for source in sources]
+        length_values, offset_values, total_blocks = self._multi_tensor_layout(
+            lengths
+        )
+        with self.runtime.tensor_buffers(
+            *((source, "in") for source in sources)
+        ) as source_pointers, self.runtime.buffers(
+            len(sources) * 8,
+            len(sources) * 8,
+            (len(sources) + 1) * 8,
+            total_blocks * 4,
+            total_blocks * 4,
+        ) as buffers:
+            pointer_table, length_pointer, offset_pointer, partial_a, partial_b = buffers
+            self.runtime.upload(
+                pointer_table, _uint64_storage(source_pointers)
+            )
+            self.runtime.upload(length_pointer, length_values)
+            self.runtime.upload(offset_pointer, offset_values)
+            self.runtime.launch(
+                "mimillm_multi_tensor_sum_squares",
+                (total_blocks, 1, 1),
+                (BLOCK_SIZE, 1, 1),
+                [
+                    self._pointer(pointer_table),
+                    self._pointer(length_pointer),
+                    self._pointer(offset_pointer),
+                    self._count(len(sources)),
+                    self._pointer(partial_a),
+                ],
+                shared_memory=BLOCK_SIZE * 4,
+            )
+            current = partial_a
+            spare = partial_b
+            remaining = total_blocks
+            while remaining > 1:
+                output_count = (
+                    remaining + 2 * BLOCK_SIZE - 1
+                ) // (2 * BLOCK_SIZE)
+                self.runtime.launch(
+                    "mimillm_reduce_sum",
+                    (output_count, 1, 1),
+                    (BLOCK_SIZE, 1, 1),
+                    [
+                        self._pointer(current),
+                        self._pointer(spare),
+                        self._count(remaining),
+                    ],
+                    shared_memory=BLOCK_SIZE * 4,
+                )
+                current, spare = spare, current
+                remaining = output_count
             output = array("f", [0.0])
-            self.runtime.finish_output(output, output_pointer)
+            self.runtime.download(output, current)
         return float(output[0])
 
-    def scale_inplace(self, values: array, scalar: float) -> None:
-        with self.runtime.tensor_buffers((values, "inout")) as (pointer,):
-            self.runtime.launch(
-                "mimillm_scalar_multiply", ((len(values) + BLOCK_SIZE - 1) // BLOCK_SIZE, 1, 1), (BLOCK_SIZE, 1, 1),
-                [self._pointer(pointer), ctypes.c_float(scalar), self._pointer(pointer), self._count(len(values))],
+    def scale_tensors_inplace(
+        self, values: Sequence[array], scalar: float,
+    ) -> None:
+        """Scale any number of resident tensors with one CUDA launch."""
+        sources = [source for source in values if len(source)]
+        if not sources:
+            return
+        lengths = [len(source) for source in sources]
+        length_values, offset_values, total_blocks = self._multi_tensor_layout(
+            lengths
+        )
+        with self.runtime.tensor_buffers(
+            *((source, "inout") for source in sources)
+        ) as source_pointers, self.runtime.buffers(
+            len(sources) * 8,
+            len(sources) * 8,
+            (len(sources) + 1) * 8,
+        ) as metadata:
+            pointer_table, length_pointer, offset_pointer = metadata
+            self.runtime.upload(
+                pointer_table, _uint64_storage(source_pointers)
             )
-            self.runtime.finish_output(values, pointer)
+            self.runtime.upload(length_pointer, length_values)
+            self.runtime.upload(offset_pointer, offset_values)
+            self.runtime.launch(
+                "mimillm_multi_tensor_scale",
+                (total_blocks, 1, 1),
+                (BLOCK_SIZE, 1, 1),
+                [
+                    self._pointer(pointer_table),
+                    self._pointer(length_pointer),
+                    self._pointer(offset_pointer),
+                    self._count(len(sources)),
+                    ctypes.c_float(scalar),
+                ],
+            )
+            for storage, pointer in zip(sources, source_pointers):
+                self.runtime.finish_output(storage, pointer)
+
+    def scale_inplace(self, values: array, scalar: float) -> None:
+        self.scale_tensors_inplace((values,), scalar)
 
 
 def is_available() -> bool:

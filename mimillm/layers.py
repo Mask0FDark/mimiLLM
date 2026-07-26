@@ -68,8 +68,10 @@ class Embedding(Module):
             (num_embeddings, embedding_dim),
         )
 
-    def forward(self, indices: list[int]) -> Tensor:
-        return self.weight.embedding(indices)
+    def forward(
+        self, indices: list[int], *, static_role: str | None = None,
+    ) -> Tensor:
+        return self.weight.embedding(indices, static_role=static_role)
 
 
 class RMSNorm(Module):

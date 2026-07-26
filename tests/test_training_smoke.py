@@ -11,6 +11,7 @@ os.environ.setdefault("MIMILLM_BACKEND", "python")
 
 from mimillm.checkpoint import load_checkpoint, save_checkpoint
 from mimillm.optim import AdamW
+from mimillm.training import _pad_static_cuda_batch
 from mimillm.transformer import DecoderTransformer, TransformerConfig
 from mimillm import (
     load_model,
@@ -29,6 +30,26 @@ class TrainingSmokeTests(unittest.TestCase):
             batch_size=1, steps=3, learning_rate=0.02, weight_decay=0.0,
             warmup_steps=0, validation_interval=1, checkpoint_interval=1, seed=7,
         )
+
+    def test_static_cuda_padding_preserves_targets_and_masks_padding(self) -> None:
+        inputs = [[257, 10], [257, 20, 21]]
+        targets = [[10, 258], [20, 21, 258]]
+        weights = [[1.0, 1.0], [0.0, 1.0, 1.0]]
+        _pad_static_cuda_batch(
+            inputs, targets, weights, width=4, pad_token=256,
+        )
+        self.assertEqual(inputs, [
+            [257, 10, 256, 256],
+            [257, 20, 21, 256],
+        ])
+        self.assertEqual(targets, [
+            [10, 258, 256, 256],
+            [20, 21, 258, 256],
+        ])
+        self.assertEqual(weights, [
+            [1.0, 1.0, 0.0, 0.0],
+            [0.0, 1.0, 1.0, 0.0],
+        ])
 
     def test_overfit_one_batch_and_resume(self) -> None:
         inputs, targets = [[257, 10, 11, 12]], [10, 11, 12, 258]

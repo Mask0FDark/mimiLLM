@@ -259,6 +259,71 @@ class CudaBackendTests(unittest.TestCase):
         self.cuda.scale_inplace(values, 0.5)
         self.assertClose(values, [1.0, -2.0])
 
+    def test_multi_tensor_optimizer_and_gradient_helpers(self) -> None:
+        expected_parameters = [
+            array("f", [1.0, -2.0]),
+            array("f", [0.25, 3.0, -4.0]),
+        ]
+        actual_parameters = [
+            array("f", values) for values in expected_parameters
+        ]
+        gradients = [
+            array("f", [0.5, -0.25]),
+            array("f", [-0.1, 0.2, 0.4]),
+        ]
+        expected_first = [
+            array("f", [0.0] * len(values)) for values in expected_parameters
+        ]
+        expected_second = [
+            array("f", [0.0] * len(values)) for values in expected_parameters
+        ]
+        actual_first = [
+            array("f", values) for values in expected_first
+        ]
+        actual_second = [
+            array("f", values) for values in expected_second
+        ]
+        options = {
+            "learning_rate": 0.1,
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "epsilon": 1e-8,
+            "weight_decay": 0.01,
+            "step": 1,
+        }
+        for parameter, gradient, first, second in zip(
+            expected_parameters, gradients, expected_first, expected_second,
+        ):
+            self.cuda.adamw_update(
+                parameter, gradient, first, second, **options,
+            )
+        self.cuda.adamw_update_many(
+            actual_parameters,
+            gradients,
+            actual_first,
+            actual_second,
+            **options,
+        )
+        for actual, expected in zip(actual_parameters, expected_parameters):
+            self.assertClose(actual, expected, places=5)
+        for actual, expected in zip(actual_first, expected_first):
+            self.assertClose(actual, expected, places=6)
+        for actual, expected in zip(actual_second, expected_second):
+            self.assertClose(actual, expected, places=7)
+
+        self.assertAlmostEqual(
+            self.cuda.global_sum_squares(gradients),
+            sum(value * value for values in gradients for value in values),
+            places=5,
+        )
+        self.cuda.scale_tensors_inplace(actual_parameters, 0.25)
+        for actual, expected in zip(actual_parameters, expected_parameters):
+            self.assertClose(
+                actual,
+                [value * 0.25 for value in expected],
+                places=5,
+            )
+
     def test_prepared_optimizer_state_is_lazy_and_host_mutations_refresh_device(self) -> None:
         parameters, first, second = self.cuda.prepare_optimizer_state(
             [array("f", [1.0, -2.0])],

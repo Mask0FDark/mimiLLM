@@ -30,7 +30,7 @@ class PublicApiTests(unittest.TestCase):
             mimillm.create_model(mimillm.ModelConfig(), d_model=8)
 
     def test_version_and_exports(self) -> None:
-        self.assertEqual(mimillm.__version__, "0.10.6")
+        self.assertEqual(mimillm.__version__, "0.11.0.dev0")
         for name in (
             "Tensor", "AdamW", "TokenDataset", "create_model", "load_model",
             "save_model", "train_from_config", "CudaBackend", "cuda_is_available",
@@ -44,6 +44,8 @@ class PublicApiTests(unittest.TestCase):
             "format_dialogue_prompt",
             "save_dialogue_evaluation",
             "run_one_pair_sft_acceptance",
+            "StaticCudaTrainer", "StaticTrainingStepResult",
+            "compile_static_cuda_training",
             "HailoRuntimeInfo", "HailoHefInfo", "hailo_is_available",
             "inspect_hailo_runtime", "inspect_hailo_hef",
         ):
@@ -81,7 +83,10 @@ class PublicApiTests(unittest.TestCase):
             self.assertTrue((model_dir / "model.safetensors").is_file())
             restored = mimillm.load_model(model_dir)
             restored_from_file = mimillm.load_model(model_dir / "model.safetensors")
-        self.assertEqual(restored([[257, 1, 2, 3]]).data, expected.data)
+        self.assertEqual(
+            list(restored([[257, 1, 2, 3]]).data),
+            list(expected.data),
+        )
         self.assertEqual(restored_from_file.config, config)
 
     def test_bpe_model_directory_round_trip_saves_tokenizer_json(self) -> None:
@@ -104,5 +109,5 @@ class PublicApiTests(unittest.TestCase):
             restored_from_file = mimillm.load_model(model_dir / "model.safetensors")
         self.assertIsInstance(restored.tokenizer, mimillm.BpeTokenizer)
         self.assertEqual(restored.tokenizer.to_dict(), tokenizer.to_dict())
-        self.assertEqual(restored(inputs).data, expected.data)
+        self.assertEqual(list(restored(inputs).data), list(expected.data))
         self.assertEqual(restored_from_file.tokenizer.VOCAB_SIZE, tokenizer.VOCAB_SIZE)

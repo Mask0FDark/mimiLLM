@@ -44,6 +44,7 @@ class TransformerConfig:
     warmup_steps: int = 10
     validation_interval: int = 20
     checkpoint_interval: int = 50
+    cuda_graph_training: bool = True
     save_validation_checkpoints: bool = False
     early_stopping_patience: int | None = None
     early_stopping_min_delta: float = 0.0
@@ -159,6 +160,8 @@ class TransformerConfig:
             raise ValueError("интервалы должны быть положительными, warmup_steps >= 0")
         if not isinstance(self.save_validation_checkpoints, bool):
             raise TypeError("save_validation_checkpoints must be a boolean")
+        if not isinstance(self.cuda_graph_training, bool):
+            raise TypeError("cuda_graph_training must be a boolean")
         if self.early_stopping_patience is not None and (
             not isinstance(self.early_stopping_patience, int)
             or isinstance(self.early_stopping_patience, bool)
@@ -306,9 +309,13 @@ class DecoderTransformer(Module):
         if time > self.config.context_length:
             raise ValueError(f"длина {time} превышает контекст {self.config.context_length}")
         flat = [token for row in batches for token in row]
-        token_vectors = self.token_embedding(flat).reshape(batch, time, self.config.d_model)
+        token_vectors = self.token_embedding(
+            flat, static_role="token_ids",
+        ).reshape(batch, time, self.config.d_model)
         positions = list(range(time)) * batch
-        position_vectors = self.position_embedding(positions).reshape(batch, time, self.config.d_model)
+        position_vectors = self.position_embedding(
+            positions, static_role="position_ids",
+        ).reshape(batch, time, self.config.d_model)
         hidden = token_vectors + position_vectors
         for block in self.blocks:
             hidden = block(hidden)

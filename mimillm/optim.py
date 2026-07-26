@@ -51,13 +51,16 @@ class Optimizer:
         norm = math.sqrt(squared)
         if norm > max_norm:
             scale = max_norm / (norm + 1e-12)
-            for parameter in self.parameters:
-                if parameter.grad is not None:
-                    if hasattr(selected_backend, "scale_inplace"):
-                        selected_backend.scale_inplace(parameter.grad, scale)
-                    else:
-                        for index in range(parameter.numel):
-                            parameter.grad[index] *= scale
+            if hasattr(selected_backend, "scale_tensors_inplace"):
+                selected_backend.scale_tensors_inplace(gradients, scale)
+            else:
+                for parameter in self.parameters:
+                    if parameter.grad is not None:
+                        if hasattr(selected_backend, "scale_inplace"):
+                            selected_backend.scale_inplace(parameter.grad, scale)
+                        else:
+                            for index in range(parameter.numel):
+                                parameter.grad[index] *= scale
         return norm
 
     def step(self) -> None:
@@ -132,17 +135,35 @@ class AdamW(Optimizer):
         from .backend import get_backend
 
         selected_backend = get_backend()
-        if hasattr(selected_backend, "adamw_update"):
+        active = [
+            (parameter, parameter.grad, first, second)
             for parameter, first, second in zip(
                 self.parameters, self.first_moments, self.second_moments
-            ):
-                if parameter.grad is not None:
-                    selected_backend.adamw_update(
-                        parameter.data, parameter.grad, first, second,
-                        learning_rate=self.learning_rate, beta1=self.beta1,
-                        beta2=self.beta2, epsilon=self.epsilon,
-                        weight_decay=self.weight_decay, step=self.step_count,
-                    )
+            )
+            if parameter.grad is not None
+        ]
+        if hasattr(selected_backend, "adamw_update_many") and active:
+            selected_backend.adamw_update_many(
+                [item[0].data for item in active],
+                [item[1] for item in active],
+                [item[2] for item in active],
+                [item[3] for item in active],
+                learning_rate=self.learning_rate,
+                beta1=self.beta1,
+                beta2=self.beta2,
+                epsilon=self.epsilon,
+                weight_decay=self.weight_decay,
+                step=self.step_count,
+            )
+            return
+        if hasattr(selected_backend, "adamw_update"):
+            for parameter, gradient, first, second in active:
+                selected_backend.adamw_update(
+                    parameter.data, gradient, first, second,
+                    learning_rate=self.learning_rate, beta1=self.beta1,
+                    beta2=self.beta2, epsilon=self.epsilon,
+                    weight_decay=self.weight_decay, step=self.step_count,
+                )
             return
         correction1 = 1.0 - self.beta1 ** self.step_count
         correction2 = 1.0 - self.beta2 ** self.step_count

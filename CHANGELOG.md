@@ -1,5 +1,60 @@
 # Changelog / История изменений
 
+## 0.11.0-dev — 2026-07-26
+
+### English
+
+- Added a native fixed-shape CUDA Graph training path. On CUDA it is enabled
+  by default with `cuda_graph_training: true`: mimiLLM records forward,
+  masked cross-entropy, and backward once, then replays the graph with new
+  token IDs, targets, and SFT loss weights on every step.
+- Added device-resident static storage for captured inputs, intermediate
+  tensors, constants, loss, and gradients. The ordinary AdamW step remains
+  outside the graph, so dynamic learning-rate schedules, gradient clipping,
+  checkpoints, and resume behavior keep their existing semantics.
+- CUDA gradient clipping and AdamW now use multi-tensor kernels. This removes
+  one kernel launch per parameter for norm calculation, scaling, and optimizer
+  updates.
+- Added `StaticCudaTrainer`, `compile_static_cuda_training`, a native
+  `tools/benchmark_static_cuda.py` benchmark, and correctness tests with
+  changing batches and changing answer-only SFT masks. The tests do not use
+  PyTorch, NumPy, CuPy, or another ML runtime.
+- On the development RTX 3050 Laptop GPU, a 1,500,604-parameter model
+  (`context=256`, `batch=8`, `vocab=2048`) reached a median 71,197 tokens/s.
+  That is 13.5 times the current eager mimiLLM CUDA path and 18.0 times the
+  older 3,953 tokens/s reference measurement. Results depend on GPU,
+  architecture, batch size, and thermal state.
+- Static CUDA training requires a fixed batch size and context length and uses
+  additional VRAM to preserve captured storage. Set
+  `cuda_graph_training: false` to use the eager CUDA path.
+
+### Русский
+
+- Добавлен нативный режим обучения через CUDA Graph с фиксированными формами.
+  На CUDA он включён по умолчанию параметром
+  `cuda_graph_training: true`: mimiLLM один раз записывает forward,
+  masked cross-entropy и backward, а затем повторяет граф с новыми token ID,
+  target и масками answer-only SFT на каждом шаге.
+- Добавлено постоянное хранение входов, промежуточных тензоров, констант, loss
+  и градиентов в VRAM. Обычный шаг AdamW остаётся за пределами графа, поэтому
+  расписание learning rate, gradient clipping, checkpoint и продолжение
+  обучения сохраняют прежнее поведение.
+- Gradient clipping и AdamW на CUDA теперь используют multi-tensor kernels.
+  Это убирает отдельный запуск ядра для каждого параметра при подсчёте нормы,
+  масштабировании и обновлении оптимизатором.
+- Добавлены `StaticCudaTrainer`, `compile_static_cuda_training`, нативный
+  бенчмарк `tools/benchmark_static_cuda.py` и тесты корректности со сменой
+  batch и масок answer-only SFT. В тестах не используются PyTorch, NumPy,
+  CuPy или другой ML runtime.
+- На RTX 3050 Laptop GPU, использованной при разработке, модель с 1 500 604
+  параметрами (`context=256`, `batch=8`, `vocab=2048`) достигла медианы
+  71 197 токенов/с. Это в 13,5 раза быстрее текущего eager CUDA в mimiLLM и в
+  18,0 раза быстрее старого контрольного результата 3 953 токена/с. Скорость
+  зависит от GPU, архитектуры, batch size и температуры устройства.
+- Статический CUDA-режим требует постоянных batch size и context length и
+  расходует дополнительную VRAM для сохранения записанных буферов. Для
+  возврата к eager CUDA укажите `cuda_graph_training: false`.
+
 ## 0.10.6 — 2026-07-24
 
 ### English

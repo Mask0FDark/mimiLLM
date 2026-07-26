@@ -469,3 +469,132 @@ extern "C" __global__ void mimillm_sum_squares(const float* input, float* output
     const auto index = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index < count) atomicAdd(output, input[index] * input[index]);
 }
+
+__device__ std::int64_t mimillm_tensor_for_block(
+    std::int64_t block,
+    const std::int64_t* block_offsets,
+    std::int64_t tensor_count
+) {
+    std::int64_t low = 0;
+    std::int64_t high = tensor_count;
+    while (low + 1 < high) {
+        const std::int64_t middle = (low + high) / 2;
+        if (block_offsets[middle] <= block) low = middle;
+        else high = middle;
+    }
+    return low;
+}
+
+extern "C" __global__ void mimillm_multi_tensor_sum_squares(
+    const unsigned long long* pointers,
+    const std::int64_t* lengths,
+    const std::int64_t* block_offsets,
+    std::int64_t tensor_count,
+    float* partial
+) {
+    extern __shared__ float shared[];
+    const auto global_block = static_cast<std::int64_t>(blockIdx.x);
+    const auto tensor = mimillm_tensor_for_block(
+        global_block, block_offsets, tensor_count
+    );
+    const auto local_block = global_block - block_offsets[tensor];
+    const auto index = local_block * blockDim.x + threadIdx.x;
+    const auto values = reinterpret_cast<const float*>(pointers[tensor]);
+    const float value = index < lengths[tensor] ? values[index] : 0.0F;
+    shared[threadIdx.x] = value * value;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (threadIdx.x < stride) {
+            shared[threadIdx.x] += shared[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) partial[global_block] = shared[0];
+}
+
+extern "C" __global__ void mimillm_reduce_sum(
+    const float* input, float* output, std::int64_t count
+) {
+    extern __shared__ float shared[];
+    const auto first = (
+        static_cast<std::int64_t>(blockIdx.x) * blockDim.x * 2
+        + threadIdx.x
+    );
+    float total = first < count ? input[first] : 0.0F;
+    const auto second = first + blockDim.x;
+    if (second < count) total += input[second];
+    shared[threadIdx.x] = total;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (threadIdx.x < stride) {
+            shared[threadIdx.x] += shared[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) output[blockIdx.x] = shared[0];
+}
+
+extern "C" __global__ void mimillm_multi_tensor_scale(
+    const unsigned long long* pointers,
+    const std::int64_t* lengths,
+    const std::int64_t* block_offsets,
+    std::int64_t tensor_count,
+    float scale
+) {
+    const auto global_block = static_cast<std::int64_t>(blockIdx.x);
+    const auto tensor = mimillm_tensor_for_block(
+        global_block, block_offsets, tensor_count
+    );
+    const auto local_block = global_block - block_offsets[tensor];
+    const auto index = local_block * blockDim.x + threadIdx.x;
+    if (index < lengths[tensor]) {
+        auto values = reinterpret_cast<float*>(pointers[tensor]);
+        values[index] *= scale;
+    }
+}
+
+extern "C" __global__ void mimillm_multi_tensor_adamw(
+    const unsigned long long* parameter_pointers,
+    const unsigned long long* gradient_pointers,
+    const unsigned long long* first_pointers,
+    const unsigned long long* second_pointers,
+    const std::int64_t* lengths,
+    const std::int64_t* block_offsets,
+    std::int64_t tensor_count,
+    float learning_rate,
+    float beta1,
+    float beta2,
+    float epsilon,
+    float weight_decay,
+    float correction1,
+    float correction2
+) {
+    const auto global_block = static_cast<std::int64_t>(blockIdx.x);
+    const auto tensor = mimillm_tensor_for_block(
+        global_block, block_offsets, tensor_count
+    );
+    const auto local_block = global_block - block_offsets[tensor];
+    const auto index = local_block * blockDim.x + threadIdx.x;
+    if (index >= lengths[tensor]) return;
+    auto parameter = reinterpret_cast<float*>(parameter_pointers[tensor]);
+    const auto gradient = reinterpret_cast<const float*>(
+        gradient_pointers[tensor]
+    );
+    auto first = reinterpret_cast<float*>(first_pointers[tensor]);
+    auto second = reinterpret_cast<float*>(second_pointers[tensor]);
+    const float value = gradient[index];
+    const float first_value = (
+        beta1 * first[index] + (1.0F - beta1) * value
+    );
+    const float second_value = (
+        beta2 * second[index] + (1.0F - beta2) * value * value
+    );
+    first[index] = first_value;
+    second[index] = second_value;
+    const float update = (
+        (first_value / correction1)
+        / (sqrtf(second_value / correction2) + epsilon)
+        + weight_decay * parameter[index]
+    );
+    parameter[index] -= learning_rate * update;
+}

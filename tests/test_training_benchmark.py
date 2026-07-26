@@ -1,7 +1,10 @@
 """Tests for the deterministic training benchmark harness."""
 
+import os
 import unittest
 
+from mimillm import Tensor
+from mimillm.backend import reset_backend
 from mimillm.backend_cuda import is_available as cuda_is_available
 from tools.benchmark_training import benchmark_training_step, training_step_snapshot
 
@@ -65,6 +68,16 @@ class TrainingBenchmarkTests(unittest.TestCase):
             expected["parameter_checksum"],
             places=3,
         )
+
+    @unittest.skipUnless(cuda_is_available(), "CUDA backend is unavailable")
+    def test_cuda_shared_intermediate_gradient_preserves_branches(self) -> None:
+        os.environ["MIMILLM_BACKEND"] = "cuda"
+        reset_backend()
+        value = Tensor([1.0, -2.0, 3.0, -4.0], (2, 2), requires_grad=True)
+        reshaped = value.reshape(4)
+        loss = ((reshaped * 2.0) + (reshaped * 3.0)).sum()
+        loss.backward()
+        self.assertEqual(list(value.grad or ()), [5.0, 5.0, 5.0, 5.0])
 
     @unittest.skipUnless(cuda_is_available(), "CUDA backend is unavailable")
     def test_cuda_repeated_steps_release_autograd_device_buffers(self) -> None:

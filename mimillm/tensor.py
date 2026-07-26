@@ -252,10 +252,16 @@ class Tensor:
                 not take_ownership
                 and getattr(values, "_mimillm_cuda_array", False)
             ):
-                # Autograd consumers may later mutate their accumulated
-                # gradient. Keep a distinct CUDA allocation without forcing
-                # a device-to-host synchronization merely to break aliasing.
-                self.grad = get_backend().scalar_multiply(values, 1.0)
+                if not self.parents and self._backward_fn is None:
+                    # Optimizers may modify a leaf gradient in place, so leaf
+                    # tensors keep their own device allocation.
+                    self.grad = get_backend().scalar_multiply(values, 1.0)
+                else:
+                    # Intermediate gradients are read-only. Accumulation
+                    # replaces the storage instead of mutating it, so sharing
+                    # avoids a redundant CUDA copy for every reshape and
+                    # residual edge in the autograd graph.
+                    self.grad = values
             else:
                 self.grad = (
                     values
@@ -864,7 +870,9 @@ class Tensor:
         output._backward_fn = backward_fn if output.requires_grad else None
         return output
 
-    def embedding(self, indices: Sequence[int]) -> "Tensor":
+    def embedding(
+        self, indices: Sequence[int], *, static_role: str | None = None,
+    ) -> "Tensor":
         """Выбирает строки таблицы формы (vocab, embedding)."""
         if self.ndim != 2:
             raise ValueError("embedding ожидает таблицу с двумя осями")
@@ -873,6 +881,9 @@ class Tensor:
         if any(index < 0 or index >= rows for index in checked):
             raise IndexError("индекс embedding вне словаря")
         selected_backend = get_backend()
+        prepare_static = getattr(selected_backend, "prepare_static_indices", None)
+        if static_role is not None and callable(prepare_static):
+            checked = prepare_static(checked, static_role)
         values = selected_backend.embedding_gather(self.data, checked, rows, width)
         output = Tensor(
             values, (len(checked), width), requires_grad=self.requires_grad,
@@ -919,6 +930,18 @@ class Tensor:
             if weight_sum <= 0.0:
                 raise ValueError("хотя бы один weight должен быть положительным")
         selected_backend = get_backend()
+        prepare_static_indices = getattr(
+            selected_backend, "prepare_static_indices", None,
+        )
+        if callable(prepare_static_indices):
+            checked = prepare_static_indices(checked, "targets")
+        prepare_static_floats = getattr(
+            selected_backend, "prepare_static_floats", None,
+        )
+        if checked_weights is not None and callable(prepare_static_floats):
+            checked_weights = prepare_static_floats(
+                checked_weights, "loss_weights",
+            )
         native_weighted = checked_weights is not None and hasattr(
             selected_backend, "weighted_cross_entropy"
         )

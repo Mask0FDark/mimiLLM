@@ -46,6 +46,11 @@ from .optim import AdamW, Optimizer, SGD
 from .parameter import Parameter
 from .pipeline import PipelineQualityError, PipelineResult, PipelineStage, train_pipeline
 from .safetensors import load_safetensors, save_safetensors
+from .static_cuda import (
+    StaticCudaTrainer,
+    StaticTrainingStepResult,
+    compile_static_cuda_training,
+)
 from .tensor import Tensor, is_grad_enabled, no_grad
 from .tokenizer import (
     BpeTokenizer,
@@ -103,6 +108,8 @@ __all__ = [
     "RMSNorm",
     "ReLU",
     "SGD",
+    "StaticCudaTrainer",
+    "StaticTrainingStepResult",
     "Tensor",
     "TokenDataset",
     "TokenizerReport",
@@ -114,6 +121,7 @@ __all__ = [
     "analyze_tokenizer",
     "audit_dataset",
     "create_model",
+    "compile_static_cuda_training",
     "create_tokenizer",
     "cross_entropy",
     "cuda_is_available",
@@ -159,4 +167,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.10.6"
+__version__ = "0.11.0.dev0"

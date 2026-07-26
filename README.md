@@ -585,6 +585,40 @@ python tools/benchmark_training.py --backend cuda --repeats 9 --warmup 3
 Для BPE-модели можно передать реальный размер словаря и токенизатор через
 `--vocab-size` и `--tokenizer-model`.
 
+#### Статическое CUDA-обучение
+
+При обучении на CUDA mimiLLM по умолчанию использует CUDA Graph:
+
+```json
+{
+  "cuda_graph_training": true
+}
+```
+
+Forward, masked cross-entropy и backward записываются при первом настоящем
+batch, после чего следующие шаги повторяют уже готовый граф с новыми token ID,
+target и масками answer-only SFT. Learning rate, gradient clipping и AdamW
+остаются динамическими, а формат весов и checkpoint не меняется. Режим не
+использует PyTorch, NumPy, CuPy или другой ML runtime.
+
+CUDA Graph требует одинаковых `batch_size` и `context_length` на всех шагах и
+расходует дополнительную VRAM на постоянные буферы. Компиляция первого batch
+занимает дополнительное время. Обычный цикл обучения mimiLLM автоматически
+дополняет короткие примеры PAD-токенами с нулевым весом loss. Если памяти
+недостаточно или нужно сравнить скорость с обычным CUDA-выполнением, установите
+`"cuda_graph_training": false`.
+
+Отдельный замер статического пути:
+
+```powershell
+python tools/benchmark_static_cuda.py --tokenizer-model path\to\tokenizer.json
+```
+
+На RTX 3050 Laptop GPU модель с 1 500 604 параметрами, `context_length=256`,
+`batch_size=8` и `vocab_size=2048` показала медиану 71 197 токенов/с. Это в
+13,5 раза быстрее текущего eager CUDA-пути на той же машине. Результат зависит
+от GPU, размеров модели, batch и состояния охлаждения.
+
 ### C++ и Python
 
 Установка через pip на Windows x64 содержит готовую C++ DLL. На Linux, включая Raspberry Pi OS/Ubuntu arm64, `pip install` автоматически собирает `.so`, если установлен `g++`, `clang++` или `c++`. Ручная сборка нужна только при изменении C++-исходников:
@@ -1000,6 +1034,40 @@ per-phase timings, run:
 ```bash
 python tools/benchmark_training.py --backend cuda --repeats 9 --warmup 3
 ```
+
+#### Static CUDA training
+
+CUDA training uses a fixed-shape CUDA Graph by default:
+
+```json
+{
+  "cuda_graph_training": true
+}
+```
+
+mimiLLM records forward, masked cross-entropy, and backward on the first real
+batch. Later steps replay the captured graph with new token IDs, targets, and
+answer-only SFT masks. Learning-rate schedules, gradient clipping, and AdamW
+remain dynamic, while weight and checkpoint formats remain unchanged. This
+path does not use PyTorch, NumPy, CuPy, or another ML runtime.
+
+CUDA Graph replay requires a constant `batch_size` and `context_length` and
+uses extra VRAM for persistent captured buffers. The first batch also pays the
+one-time compilation cost. The standard mimiLLM training loop automatically
+pads shorter examples with zero-loss PAD tokens. Set
+`"cuda_graph_training": false` when memory is limited or when comparing
+against eager CUDA.
+
+Run the dedicated benchmark with:
+
+```bash
+python tools/benchmark_static_cuda.py --tokenizer-model path/to/tokenizer.json
+```
+
+On the development RTX 3050 Laptop GPU, a 1,500,604-parameter model with
+`context_length=256`, `batch_size=8`, and `vocab_size=2048` reached a median
+71,197 tokens/s, 13.5 times the current eager CUDA path on the same machine.
+Results vary with GPU, model dimensions, batch size, and thermal conditions.
 
 The library has also been tested on a Raspberry Pi 5 running Ubuntu Server
 24.04 arm64. The setup helper creates an isolated venv, installs mimiLLM, and

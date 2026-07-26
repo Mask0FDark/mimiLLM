@@ -19,6 +19,7 @@ from .backend import get_backend, reset_backend
 from .checkpoint import load_checkpoint, save_checkpoint
 from .dataset import TokenDataset, load_qa_text, load_text_documents
 from .optim import AdamW
+from .static_cuda import StaticCudaTrainer, compile_static_cuda_training
 from .tensor import no_grad
 from .tokenizer import (
     BpeTokenizer,
@@ -519,6 +520,37 @@ def validation_loss(
     return total
 
 
+def _pad_static_cuda_batch(
+    inputs: list[list[int]],
+    targets: list[list[int]],
+    loss_weights: list[list[float]],
+    *,
+    width: int,
+    pad_token: int,
+) -> None:
+    """Pad a sampled batch to the fixed shape required by CUDA Graph replay."""
+    if not (len(inputs) == len(targets) == len(loss_weights)):
+        raise ValueError("CUDA Graph batch components must have equal row counts")
+    for row_inputs, row_targets, row_weights in zip(
+        inputs, targets, loss_weights,
+    ):
+        if not (
+            len(row_inputs) == len(row_targets) == len(row_weights)
+        ):
+            raise ValueError(
+                "CUDA Graph input, target, and loss-weight rows must align"
+            )
+        if len(row_inputs) > width:
+            raise ValueError(
+                f"CUDA Graph row has {len(row_inputs)} tokens, maximum is {width}"
+            )
+        padding = width - len(row_inputs)
+        if padding:
+            row_inputs.extend([pad_token] * padding)
+            row_targets.extend([pad_token] * padding)
+            row_weights.extend([0.0] * padding)
+
+
 def train_model(
     config: TransformerConfig,
     *,
@@ -664,6 +696,14 @@ def train_model(
         flush=True,
     )
     progress = _TrainingProgress(config.steps, start_step, batches_per_epoch)
+    static_trainer: StaticCudaTrainer | None = None
+    use_static_cuda = backend_name == "cuda" and config.cuda_graph_training
+    if use_static_cuda:
+        print(
+            "CUDA Graph training: enabled; the first batch compiles a fixed "
+            "forward/backward plan",
+            flush=True,
+        )
 
     last_step = start_step
     last_checkpoint_step = -1
@@ -684,7 +724,11 @@ def train_model(
                 epoch_batches = 0
                 epoch_tokens = 0
                 epoch_sources = {}
-                epoch_timings = {"forward": 0.0, "backward": 0.0, "optimizer": 0.0}
+                epoch_timings = (
+                    {"static_graph": 0.0, "optimizer": 0.0}
+                    if use_static_cuda else
+                    {"forward": 0.0, "backward": 0.0, "optimizer": 0.0}
+                )
             started = time.perf_counter()
             optimizer.learning_rate = learning_rate_at(
                 step, config.steps, config.learning_rate, config.warmup_steps,
@@ -701,6 +745,14 @@ def train_model(
             inputs, targets, loss_weights = train_data.sample_batch_with_loss_weights(
                 config.batch_size, config.context_length, rng
             )
+            if use_static_cuda:
+                _pad_static_cuda_batch(
+                    inputs,
+                    targets,
+                    loss_weights,
+                    width=config.context_length,
+                    pad_token=train_data.tokenizer.PAD,
+                )
             data_finished = time.perf_counter()
             tokens = sum(len(row) for row in inputs)
             progress.stage(
@@ -712,57 +764,107 @@ def train_model(
                 learning_rate=optimizer.learning_rate,
                 batch_seconds=data_finished - started,
             )
-            logits = model(inputs)
-            forward_finished = time.perf_counter()
-            progress.stage(
-                step,
-                phase="loss",
-                source=train_data.last_source,
-                tokens=tokens,
-                validation_loss=latest_validation_loss,
-                learning_rate=optimizer.learning_rate,
-                batch_seconds=forward_finished - started,
-            )
-            loss = logits.reshape(-1, config.vocab_size).cross_entropy(
-                flatten(targets), weights=flatten(loss_weights)  # type: ignore[arg-type]
-            )
-            loss_value = loss.item()
-            loss_finished = time.perf_counter()
-            progress.stage(
-                step,
-                phase="backward",
-                source=train_data.last_source,
-                tokens=tokens,
-                train_loss=loss_value,
-                validation_loss=latest_validation_loss,
-                learning_rate=optimizer.learning_rate,
-                batch_seconds=loss_finished - started,
-            )
-            loss.backward()
-            backward_finished = time.perf_counter()
-            progress.stage(
-                step,
-                phase="optimizer",
-                source=train_data.last_source,
-                tokens=tokens,
-                train_loss=loss_value,
-                validation_loss=latest_validation_loss,
-                learning_rate=optimizer.learning_rate,
-                batch_seconds=backward_finished - started,
-            )
-            gradient_norm = optimizer.clip_grad_norm(config.gradient_clip_norm)
-            optimizer.step()
-            optimizer.zero_grad()
-            optimizer_finished = time.perf_counter()
+            if use_static_cuda:
+                if static_trainer is None:
+                    compile_started = time.perf_counter()
+                    try:
+                        static_trainer = compile_static_cuda_training(
+                            model, optimizer, inputs, targets, loss_weights,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "CUDA Graph training could not be compiled. "
+                            "Check available VRAM or set "
+                            "'cuda_graph_training' to false to use eager CUDA."
+                        ) from exc
+                    compile_seconds = time.perf_counter() - compile_started
+                    print(
+                        f"\nCUDA Graph compiled in {compile_seconds:.2f}s | "
+                        f"resident={backend.memory_stats()['tensor_cache_bytes'] / (1024 ** 2):.1f}MiB",
+                        flush=True,
+                    )
+                progress.stage(
+                    step,
+                    phase="static graph",
+                    source=train_data.last_source,
+                    tokens=tokens,
+                    validation_loss=latest_validation_loss,
+                    learning_rate=optimizer.learning_rate,
+                    batch_seconds=data_finished - started,
+                )
+                static_result = static_trainer.step(
+                    inputs,
+                    targets,
+                    loss_weights=loss_weights,
+                    clip_grad_norm=config.gradient_clip_norm,
+                )
+                loss_value = static_result.loss
+                gradient_norm = static_result.gradient_norm
+                assert gradient_norm is not None
+                forward_finished = data_finished
+                loss_finished = data_finished
+                backward_finished = (
+                    data_finished + static_result.graph_seconds
+                )
+                optimizer_finished = (
+                    data_finished + static_result.seconds
+                )
+            else:
+                logits = model(inputs)
+                forward_finished = time.perf_counter()
+                progress.stage(
+                    step,
+                    phase="loss",
+                    source=train_data.last_source,
+                    tokens=tokens,
+                    validation_loss=latest_validation_loss,
+                    learning_rate=optimizer.learning_rate,
+                    batch_seconds=forward_finished - started,
+                )
+                loss = logits.reshape(-1, config.vocab_size).cross_entropy(
+                    flatten(targets), weights=flatten(loss_weights)  # type: ignore[arg-type]
+                )
+                loss_value = loss.item()
+                loss_finished = time.perf_counter()
+                progress.stage(
+                    step,
+                    phase="backward",
+                    source=train_data.last_source,
+                    tokens=tokens,
+                    train_loss=loss_value,
+                    validation_loss=latest_validation_loss,
+                    learning_rate=optimizer.learning_rate,
+                    batch_seconds=loss_finished - started,
+                )
+                loss.backward()
+                backward_finished = time.perf_counter()
+                progress.stage(
+                    step,
+                    phase="optimizer",
+                    source=train_data.last_source,
+                    tokens=tokens,
+                    train_loss=loss_value,
+                    validation_loss=latest_validation_loss,
+                    learning_rate=optimizer.learning_rate,
+                    batch_seconds=backward_finished - started,
+                )
+                gradient_norm = optimizer.clip_grad_norm(config.gradient_clip_norm)
+                optimizer.step()
+                optimizer.zero_grad()
+                optimizer_finished = time.perf_counter()
             last_step = step
             elapsed = optimizer_finished - started
             tokens_per_second = tokens / elapsed
             epoch_loss_sum += loss_value
             epoch_batches += 1
             epoch_tokens += tokens
-            epoch_timings["forward"] += forward_finished - data_finished
-            epoch_timings["backward"] += backward_finished - loss_finished
-            epoch_timings["optimizer"] += optimizer_finished - backward_finished
+            if use_static_cuda:
+                epoch_timings["static_graph"] += static_result.graph_seconds
+                epoch_timings["optimizer"] += static_result.optimizer_seconds
+            else:
+                epoch_timings["forward"] += forward_finished - data_finished
+                epoch_timings["backward"] += backward_finished - loss_finished
+                epoch_timings["optimizer"] += optimizer_finished - backward_finished
             epoch_sources[train_data.last_source] = (
                 epoch_sources.get(train_data.last_source, 0) + 1
             )
@@ -913,6 +1015,9 @@ def train_model(
         if best_validation_step < 0:
             save_model(destination, model)
         print(f"Training interrupted at step {last_step}. Saved: {checkpoint_path}", flush=True)
+    finally:
+        if static_trainer is not None:
+            static_trainer.close()
 
     if not interrupted:
         progress.close_line()
