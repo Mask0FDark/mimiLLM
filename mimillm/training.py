@@ -654,9 +654,14 @@ def train_model(
     backend = get_backend()
     backend_name = getattr(backend, "name", "python")
     if backend_name == "cuda":
+        tf32_enabled = (
+            backend.set_tf32(config.cuda_tf32)
+            if hasattr(backend, "set_tf32") else False
+        )
         backend_details = (
             f"device={getattr(backend, 'device_name', 'NVIDIA GPU')} | "
-            f"vram={getattr(backend, 'device_memory', 0) / (1024 ** 3):.1f}GB"
+            f"vram={getattr(backend, 'device_memory', 0) / (1024 ** 3):.1f}GB | "
+            f"tf32={'on' if tf32_enabled else 'off'}"
         )
     else:
         backend_details = f"threads={getattr(backend, 'num_threads', 1)}"

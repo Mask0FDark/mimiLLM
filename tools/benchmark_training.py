@@ -51,6 +51,7 @@ def _training_state(
     n_heads: int = 2,
     d_mlp: int = 32,
     batch_size: int = 2,
+    cuda_tf32: bool = False,
 ) -> tuple[
     Any, TransformerConfig, DecoderTransformer, AdamW,
     list[list[int]], list[list[int]],
@@ -73,8 +74,14 @@ def _training_state(
         warmup_steps=0,
         validation_interval=1,
         checkpoint_interval=1,
+        cuda_tf32=cuda_tf32,
         seed=seed,
     )
+    if (
+        getattr(selected_backend, "name", None) == "cuda"
+        and hasattr(selected_backend, "set_tf32")
+    ):
+        selected_backend.set_tf32(cuda_tf32)
     tokenizer_model = (
         BpeTokenizer.load(tokenizer_model_path)
         if tokenizer_model_path is not None
@@ -219,6 +226,12 @@ def main() -> None:
     parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--d-mlp", type=int, default=192)
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--cuda-tf32",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="allow TF32 Tensor Cores for FP32 cuBLAS matmul",
+    )
     args = parser.parse_args()
     result = benchmark_training_step(
         backend=args.backend,
@@ -232,6 +245,7 @@ def main() -> None:
         n_heads=args.n_heads,
         d_mlp=args.d_mlp,
         batch_size=args.batch_size,
+        cuda_tf32=args.cuda_tf32,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
 

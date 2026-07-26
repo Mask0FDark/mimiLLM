@@ -129,6 +129,39 @@ class CudaBackendTests(unittest.TestCase):
             backend_python.softmax_backward(expected, upstream, 2, 3),
         )
 
+    def test_tf32_mode_is_optional_and_numerically_close(self) -> None:
+        if self.cuda.runtime.cublas is None:
+            self.skipTest("cuBLAS is unavailable")
+        rows = inner = columns = 32
+        left = [
+            math.sin(index * 0.17) * 0.5
+            for index in range(rows * inner)
+        ]
+        right = [
+            math.cos(index * 0.11) * 0.5
+            for index in range(inner * columns)
+        ]
+        try:
+            self.assertFalse(self.cuda.set_tf32(False))
+            exact = self.cuda.matmul(
+                left, right, rows, inner, columns,
+            )
+            self.assertTrue(self.cuda.set_tf32(True))
+            accelerated = self.cuda.matmul(
+                left, right, rows, inner, columns,
+            )
+            differences = [
+                abs(left_value - right_value)
+                for left_value, right_value in zip(exact, accelerated)
+            ]
+            self.assertLess(max(differences), 0.01)
+            self.assertLess(
+                sum(differences) / len(differences),
+                0.001,
+            )
+        finally:
+            self.cuda.set_tf32(False)
+
     def test_fused_causal_softmax_and_backward(self) -> None:
         values = [
             1.0, 9.0, 8.0,

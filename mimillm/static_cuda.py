@@ -56,6 +56,8 @@ class StaticCudaTrainer:
             raise RuntimeError(
                 "StaticCudaTrainer requires the mimiLLM CUDA backend"
             )
+        if hasattr(backend, "set_tf32"):
+            backend.set_tf32(model.config.cuda_tf32)
         if optimizer.parameters != model.parameters():
             raise ValueError("optimizer parameters must belong to the captured model")
         self.backend = backend

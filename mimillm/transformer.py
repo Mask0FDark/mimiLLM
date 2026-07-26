@@ -45,6 +45,7 @@ class TransformerConfig:
     validation_interval: int = 20
     checkpoint_interval: int = 50
     cuda_graph_training: bool = True
+    cuda_tf32: bool = True
     save_validation_checkpoints: bool = False
     early_stopping_patience: int | None = None
     early_stopping_min_delta: float = 0.0
@@ -162,6 +163,8 @@ class TransformerConfig:
             raise TypeError("save_validation_checkpoints must be a boolean")
         if not isinstance(self.cuda_graph_training, bool):
             raise TypeError("cuda_graph_training must be a boolean")
+        if not isinstance(self.cuda_tf32, bool):
+            raise TypeError("cuda_tf32 must be a boolean")
         if self.early_stopping_patience is not None and (
             not isinstance(self.early_stopping_patience, int)
             or isinstance(self.early_stopping_patience, bool)

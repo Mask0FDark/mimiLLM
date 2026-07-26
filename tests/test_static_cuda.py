@@ -136,3 +136,79 @@ class StaticCudaTests(unittest.TestCase):
             )
             self.assertEqual(result.step, 2)
             self.assertTrue((root / "weights" / "model.safetensors").is_file())
+
+    def test_tf32_training_remains_close_to_exact_fp32(self) -> None:
+        common = {
+            "context_length": 8,
+            "d_model": 16,
+            "n_layers": 1,
+            "n_heads": 2,
+            "d_mlp": 32,
+            "batch_size": 2,
+            "steps": 1,
+            "learning_rate": 1e-3,
+            "weight_decay": 0.0,
+            "warmup_steps": 0,
+            "validation_interval": 1,
+            "checkpoint_interval": 1,
+            "seed": 42,
+        }
+        exact_model = DecoderTransformer(
+            TransformerConfig(**common, cuda_tf32=False),
+        )
+        tf32_model = DecoderTransformer(
+            TransformerConfig(**common, cuda_tf32=True),
+        )
+        exact_optimizer = AdamW(
+            exact_model.parameters(), 1e-3, weight_decay=0.0,
+        )
+        tf32_optimizer = AdamW(
+            tf32_model.parameters(), 1e-3, weight_decay=0.0,
+        )
+        inputs = [
+            [257, 1, 2, 3, 4, 5, 6, 7],
+            [257, 8, 9, 10, 11, 12, 13, 14],
+        ]
+        targets = [
+            [1, 2, 3, 4, 5, 6, 7, 258],
+            [8, 9, 10, 11, 12, 13, 14, 258],
+        ]
+        backend = get_backend()
+        exact_loss = tf32_loss = 0.0
+        try:
+            for _ in range(6):
+                backend.set_tf32(False)
+                loss = exact_model(inputs).reshape(-1, 260).cross_entropy(
+                    flatten(targets),
+                )
+                exact_loss = loss.item()
+                loss.backward()
+                exact_optimizer.clip_grad_norm(1.0)
+                exact_optimizer.step()
+                exact_optimizer.zero_grad()
+                backend.synchronize()
+
+                backend.set_tf32(True)
+                loss = tf32_model(inputs).reshape(-1, 260).cross_entropy(
+                    flatten(targets),
+                )
+                tf32_loss = loss.item()
+                loss.backward()
+                tf32_optimizer.clip_grad_norm(1.0)
+                tf32_optimizer.step()
+                tf32_optimizer.zero_grad()
+                backend.synchronize()
+        finally:
+            backend.set_tf32(False)
+
+        self.assertLess(abs(exact_loss - tf32_loss), 5e-4)
+        differences = [
+            abs(left - right)
+            for exact_parameter, tf32_parameter in zip(
+                exact_model.parameters(), tf32_model.parameters(),
+            )
+            for left, right in zip(
+                exact_parameter.data, tf32_parameter.data,
+            )
+        ]
+        self.assertLess(sum(differences) / len(differences), 1e-4)

@@ -25,6 +25,8 @@ CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 16
 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75
 CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76
 CU_STREAM_CAPTURE_MODE_GLOBAL = 0
+CUBLAS_DEFAULT_MATH = 0
+CUBLAS_TF32_TENSOR_OP_MATH = 3
 
 
 class _CudaArray(array):
@@ -451,6 +453,7 @@ class _Cublas:
             self.library.cublasSetStream_v2(self.handle, ctypes.c_void_p(stream)),
             "cublasSetStream",
         )
+        self.tf32_enabled = False
 
     @staticmethod
     def _load_library() -> ctypes.CDLL:
@@ -494,6 +497,8 @@ class _Cublas:
         library.cublasCreate_v2.restype = ctypes.c_int
         library.cublasSetStream_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         library.cublasSetStream_v2.restype = ctypes.c_int
+        library.cublasSetMathMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        library.cublasSetMathMode.restype = ctypes.c_int
         library.cublasSgemm_v2.argtypes = [
             ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
             ctypes.c_int, ctypes.c_int, ctypes.c_int,
@@ -511,6 +516,15 @@ class _Cublas:
             ctypes.c_longlong, ctypes.c_int,
         ]
         library.cublasSgemmStridedBatched.restype = ctypes.c_int
+
+    def set_tf32(self, enabled: bool) -> None:
+        """Allow cuBLAS FP32 GEMMs to use Ampere TF32 Tensor Cores."""
+        mode = CUBLAS_TF32_TENSOR_OP_MATH if enabled else CUBLAS_DEFAULT_MATH
+        self._check(
+            self.library.cublasSetMathMode(self.handle, mode),
+            "cublasSetMathMode",
+        )
+        self.tf32_enabled = enabled
 
     @staticmethod
     def _check(status: int, operation: str) -> None:
@@ -1102,6 +1116,23 @@ class CudaBackend:
     @property
     def compiler_info(self) -> str:
         return f"NVRTC CUDA | {self.device_name}"
+
+    @property
+    def tf32_enabled(self) -> bool:
+        return bool(
+            self.runtime.cublas is not None
+            and self.runtime.cublas.tf32_enabled
+        )
+
+    def set_tf32(self, enabled: bool) -> bool:
+        """Select exact FP32 or TF32-accelerated FP32 cuBLAS matmul."""
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a boolean")
+        if self.runtime.cublas is None:
+            return False
+        self.runtime.synchronize()
+        self.runtime.cublas.set_tf32(enabled)
+        return self.runtime.cublas.tf32_enabled
 
     def create_static_trace(self) -> _StaticStorageTrace:
         """Create stable storage bookkeeping for one CUDA graph."""

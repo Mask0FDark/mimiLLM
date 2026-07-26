@@ -1,6 +1,6 @@
 # Changelog / История изменений
 
-## 0.11.0-dev — 2026-07-26
+## 0.11.0-dev.1 — 2026-07-26
 
 ### English
 
@@ -15,15 +15,20 @@
 - CUDA gradient clipping and AdamW now use multi-tensor kernels. This removes
   one kernel launch per parameter for norm calculation, scaling, and optimizer
   updates.
+- Added optional TF32 Tensor Core acceleration for FP32 cuBLAS matrix
+  multiplication. It is enabled during CUDA training by default with
+  `cuda_tf32: true`; inputs, outputs, optimizer state, checkpoints, and
+  accumulation remain FP32. Set it to `false` for exact FP32 matmul.
 - Added `StaticCudaTrainer`, `compile_static_cuda_training`, a native
   `tools/benchmark_static_cuda.py` benchmark, and correctness tests with
   changing batches and changing answer-only SFT masks. The tests do not use
   PyTorch, NumPy, CuPy, or another ML runtime.
-- On the development RTX 3050 Laptop GPU, a 1,500,604-parameter model
-  (`context=256`, `batch=8`, `vocab=2048`) reached a median 71,197 tokens/s.
-  That is 13.5 times the current eager mimiLLM CUDA path and 18.0 times the
-  older 3,953 tokens/s reference measurement. Results depend on GPU,
-  architecture, batch size, and thermal state.
+- In alternating 30-step trials on the development RTX 3050 Laptop GPU, a
+  1,500,604-parameter model (`context=256`, `batch=8`, `vocab=2048`) reached
+  75,248 tokens/s with exact FP32 and 87,506 tokens/s with TF32: a 16.3%
+  improvement. TF32 is 16.6 times the current eager mimiLLM CUDA path and
+  22.1 times the older 3,953 tokens/s reference measurement. Results depend
+  on GPU, architecture, batch size, and thermal state.
 - Static CUDA training requires a fixed batch size and context length and uses
   additional VRAM to preserve captured storage. Set
   `cuda_graph_training: false` to use the eager CUDA path.
@@ -42,15 +47,20 @@
 - Gradient clipping и AdamW на CUDA теперь используют multi-tensor kernels.
   Это убирает отдельный запуск ядра для каждого параметра при подсчёте нормы,
   масштабировании и обновлении оптимизатором.
+- Добавлено отключаемое ускорение FP32-умножений cuBLAS через TF32 Tensor
+  Cores. При CUDA-обучении оно включено по умолчанию параметром
+  `cuda_tf32: true`; входы, выходы, состояние оптимизатора, checkpoint и
+  накопление остаются FP32. Для точного FP32 matmul укажите `false`.
 - Добавлены `StaticCudaTrainer`, `compile_static_cuda_training`, нативный
   бенчмарк `tools/benchmark_static_cuda.py` и тесты корректности со сменой
   batch и масок answer-only SFT. В тестах не используются PyTorch, NumPy,
   CuPy или другой ML runtime.
-- На RTX 3050 Laptop GPU, использованной при разработке, модель с 1 500 604
-  параметрами (`context=256`, `batch=8`, `vocab=2048`) достигла медианы
-  71 197 токенов/с. Это в 13,5 раза быстрее текущего eager CUDA в mimiLLM и в
-  18,0 раза быстрее старого контрольного результата 3 953 токена/с. Скорость
-  зависит от GPU, архитектуры, batch size и температуры устройства.
+- В чередующихся замерах по 30 шагов на RTX 3050 Laptop GPU модель с
+  1 500 604 параметрами (`context=256`, `batch=8`, `vocab=2048`) показала
+  75 248 токенов/с в точном FP32 и 87 506 токенов/с с TF32 — прирост 16,3%.
+  TF32 в 16,6 раза быстрее текущего eager CUDA в mimiLLM и в 22,1 раза
+  быстрее старого контрольного результата 3 953 токена/с. Скорость зависит
+  от GPU, архитектуры, batch size и температуры устройства.
 - Статический CUDA-режим требует постоянных batch size и context length и
   расходует дополнительную VRAM для сохранения записанных буферов. Для
   возврата к eager CUDA укажите `cuda_graph_training: false`.

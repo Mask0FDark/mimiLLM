@@ -46,6 +46,7 @@ _RESUME_MUTABLE_FIELDS = {
     "steps", "validation_interval", "checkpoint_interval",
     "save_validation_checkpoints", "early_stopping_patience",
     "early_stopping_min_delta", "batches_per_epoch",
+    "cuda_graph_training", "cuda_tf32",
 }
 
 

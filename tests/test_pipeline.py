@@ -385,6 +385,14 @@ class PipelineTests(unittest.TestCase):
             output = root / "weights" / "language"
             self.assertTrue((output / "lineage.json").is_file())
             self.assertFalse((output / "training_checkpoint.bin").exists())
+            # Older lineage files predate execution-only CUDA switches. Their
+            # absence must not make an otherwise valid checkpoint impossible
+            # to resume after upgrading mimiLLM.
+            lineage_path = output / "lineage.json"
+            old_lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+            old_lineage["effective_config"].pop("cuda_tf32", None)
+            old_lineage["effective_config"].pop("cuda_graph_training", None)
+            _json(lineage_path, old_lineage)
 
             resumed = train_pipeline(
                 root / "pipeline.json", backend="python", resume_stage="language",

@@ -57,6 +57,7 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
         warmup_steps=0,
         validation_interval=1,
         checkpoint_interval=1,
+        cuda_tf32=args.cuda_tf32,
         seed=args.seed,
     )
     tokenizer = (
@@ -86,6 +87,7 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
     mean = statistics.mean(seconds)
     return {
         "backend": "cuda_graph",
+        "cuda_tf32": config.cuda_tf32,
         "parameters": model.parameter_count(),
         "tokens": tokens,
         "warmup": args.warmup,
@@ -115,6 +117,12 @@ def main() -> None:
     parser.add_argument("--n-heads", type=int, default=8)
     parser.add_argument("--d-mlp", type=int, default=522)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument(
+        "--cuda-tf32",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="allow TF32 Tensor Cores for FP32 cuBLAS matmul",
+    )
     args = parser.parse_args()
     if args.repeats <= 0 or args.warmup < 0:
         parser.error("--repeats must be positive and --warmup cannot be negative")

@@ -591,7 +591,8 @@ python tools/benchmark_training.py --backend cuda --repeats 9 --warmup 3
 
 ```json
 {
-  "cuda_graph_training": true
+  "cuda_graph_training": true,
+  "cuda_tf32": true
 }
 ```
 
@@ -600,6 +601,11 @@ batch, после чего следующие шаги повторяют уже
 target и масками answer-only SFT. Learning rate, gradient clipping и AdamW
 остаются динамическими, а формат весов и checkpoint не меняется. Режим не
 использует PyTorch, NumPy, CuPy или другой ML runtime.
+
+`cuda_tf32` разрешает cuBLAS использовать TF32 Tensor Cores видеокарт Ampere и
+новее для FP32 matmul. Данные модели, результаты matmul, накопление, AdamW и
+checkpoint остаются FP32; сокращается только точность мантиссы входов внутри
+матричного умножения. Для точного FP32 установите `"cuda_tf32": false`.
 
 CUDA Graph требует одинаковых `batch_size` и `context_length` на всех шагах и
 расходует дополнительную VRAM на постоянные буферы. Компиляция первого batch
@@ -612,12 +618,14 @@ CUDA Graph требует одинаковых `batch_size` и `context_length` 
 
 ```powershell
 python tools/benchmark_static_cuda.py --tokenizer-model path\to\tokenizer.json
+python tools/benchmark_static_cuda.py --tokenizer-model path\to\tokenizer.json --no-cuda-tf32
 ```
 
-На RTX 3050 Laptop GPU модель с 1 500 604 параметрами, `context_length=256`,
-`batch_size=8` и `vocab_size=2048` показала медиану 71 197 токенов/с. Это в
-13,5 раза быстрее текущего eager CUDA-пути на той же машине. Результат зависит
-от GPU, размеров модели, batch и состояния охлаждения.
+В чередующихся замерах на RTX 3050 Laptop GPU модель с 1 500 604 параметрами,
+`context_length=256`, `batch_size=8` и `vocab_size=2048` показала
+75 248 токенов/с в точном FP32 и 87 506 токенов/с с TF32. Прирост TF32 —
+16,3%, а ускорение относительно eager CUDA — 16,6 раза. Результат зависит от
+GPU, размеров модели, batch и состояния охлаждения.
 
 ### C++ и Python
 
@@ -1041,7 +1049,8 @@ CUDA training uses a fixed-shape CUDA Graph by default:
 
 ```json
 {
-  "cuda_graph_training": true
+  "cuda_graph_training": true,
+  "cuda_tf32": true
 }
 ```
 
@@ -1050,6 +1059,11 @@ batch. Later steps replay the captured graph with new token IDs, targets, and
 answer-only SFT masks. Learning-rate schedules, gradient clipping, and AdamW
 remain dynamic, while weight and checkpoint formats remain unchanged. This
 path does not use PyTorch, NumPy, CuPy, or another ML runtime.
+
+`cuda_tf32` allows cuBLAS to use TF32 Tensor Cores on Ampere and newer GPUs
+for FP32 matmul. Model data, matmul outputs, accumulation, AdamW state, and
+checkpoints remain FP32; only the input mantissa precision inside matrix
+multiplication is reduced. Set `"cuda_tf32": false` for exact FP32 matmul.
 
 CUDA Graph replay requires a constant `batch_size` and `context_length` and
 uses extra VRAM for persistent captured buffers. The first batch also pays the
@@ -1062,12 +1076,15 @@ Run the dedicated benchmark with:
 
 ```bash
 python tools/benchmark_static_cuda.py --tokenizer-model path/to/tokenizer.json
+python tools/benchmark_static_cuda.py --tokenizer-model path/to/tokenizer.json --no-cuda-tf32
 ```
 
-On the development RTX 3050 Laptop GPU, a 1,500,604-parameter model with
-`context_length=256`, `batch_size=8`, and `vocab_size=2048` reached a median
-71,197 tokens/s, 13.5 times the current eager CUDA path on the same machine.
-Results vary with GPU, model dimensions, batch size, and thermal conditions.
+In alternating trials on the development RTX 3050 Laptop GPU, a
+1,500,604-parameter model with `context_length=256`, `batch_size=8`, and
+`vocab_size=2048` reached 75,248 tokens/s with exact FP32 and 87,506 tokens/s
+with TF32. TF32 improved throughput by 16.3% and was 16.6 times the eager CUDA
+path on the same machine. Results vary with GPU, model dimensions, batch size,
+and thermal conditions.
 
 The library has also been tested on a Raspberry Pi 5 running Ubuntu Server
 24.04 arm64. The setup helper creates an isolated venv, installs mimiLLM, and
