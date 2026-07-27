@@ -1,5 +1,25 @@
 # Changelog / История изменений
 
+## 0.11.0-dev.4 — 2026-07-27
+
+### English
+
+- BPE encoding now keeps a bounded cache for repeated pre-tokenized byte
+  pieces. Common words and punctuation no longer replay the same merge
+  sequence millions of times while auditing, preparing, or validating a
+  corpus.
+- The cache is limited to 131,072 pieces, is local to tokenizer instances,
+  and does not change token IDs, serialization, or decoding.
+
+### Русский
+
+- BPE-кодирование теперь использует ограниченный кэш для повторяющихся
+  предтокенизированных байтовых фрагментов. Частые слова и знаки препинания
+  больше не повторяют одну и ту же цепочку слияний миллионы раз во время
+  аудита, подготовки и валидации корпуса.
+- Кэш ограничен 131 072 фрагментами, привязан к экземплярам токенизатора и не
+  меняет идентификаторы токенов, формат сохранения или декодирование.
+
 ## 0.11.0-dev.3 — 2026-07-27
 
 ### English

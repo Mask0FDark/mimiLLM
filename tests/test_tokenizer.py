@@ -112,6 +112,22 @@ class UnicodeByteTokenizerTests(unittest.TestCase):
 
 
 class BpeTokenizerTests(unittest.TestCase):
+    def test_repeated_pieces_use_bounded_encoding_cache(self) -> None:
+        tokenizer = train_bpe_tokenizer(
+            ["повтор повтор проверка"],
+            vocab_size=280,
+            min_frequency=1,
+        )
+        tokenizer._encode_piece.cache_clear()
+        first = tokenizer.encode("повтор повтор")
+        before = tokenizer._encode_piece.cache_info()
+        second = tokenizer.encode("повтор повтор")
+        after = tokenizer._encode_piece.cache_info()
+
+        self.assertEqual(second, first)
+        self.assertGreater(after.hits, before.hits)
+        self.assertEqual(after.maxsize, 131_072)
+
     def test_incremental_trainer_matches_full_rescan_reference(self) -> None:
         texts = [
             "alpha alphabet alpha alpine",

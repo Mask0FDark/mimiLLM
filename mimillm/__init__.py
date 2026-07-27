@@ -173,4 +173,4 @@ __all__ = [
     "validation_loss",
 ]
 
-__version__ = "0.11.0.dev3"
+__version__ = "0.11.0.dev4"

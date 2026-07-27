@@ -6,10 +6,11 @@ import json
 import os
 import re
 import unicodedata
-from heapq import heapify, heappop, heappush
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
+from functools import lru_cache
+from heapq import heapify, heappop, heappush
 from pathlib import Path
 from typing import Any
 
@@ -374,6 +375,9 @@ class BpeTokenizer(ByteTokenizer):
         }
         self._merge_ranks = {pair: index for index, pair in enumerate(self.merges)}
         self._pieces = pieces
+        self._encode_piece = lru_cache(maxsize=131_072)(
+            self._encode_piece_uncached
+        )
         if isinstance(required_pieces, (str, bytes)):
             raise TypeError("BPE required_pieces must be an iterable of strings")
         normalized_required: list[str] = []
@@ -425,7 +429,7 @@ class BpeTokenizer(ByteTokenizer):
                 index += 1
         return tuple(result)
 
-    def _encode_piece(self, raw: bytes) -> list[int]:
+    def _encode_piece_uncached(self, raw: bytes) -> tuple[int, ...]:
         sequence = tuple(raw)
         while len(sequence) > 1:
             candidates = {
@@ -437,7 +441,7 @@ class BpeTokenizer(ByteTokenizer):
                 break
             pair = min(candidates, key=self._merge_ranks.__getitem__)
             sequence = self._replace_pair(sequence, pair, self._merge_tokens[pair])
-        return list(sequence)
+        return sequence
 
     def encode(
         self, text: str, *, add_bos: bool = False, add_eos: bool = False,
