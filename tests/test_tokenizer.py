@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from mimillm.tokenizer import (
@@ -111,6 +112,49 @@ class UnicodeByteTokenizerTests(unittest.TestCase):
 
 
 class BpeTokenizerTests(unittest.TestCase):
+    def test_incremental_trainer_matches_full_rescan_reference(self) -> None:
+        texts = [
+            "alpha alphabet alpha alpine",
+            "beta alphabet beta better",
+            "aaaa aaab aaba abab",
+        ]
+        vocab_size = 285
+        tokenizer = train_bpe_tokenizer(
+            texts,
+            vocab_size=vocab_size,
+            min_frequency=1,
+            ensure_unicode_characters=False,
+        )
+
+        sequences: Counter[tuple[int, ...]] = Counter()
+        for text in texts:
+            for chunk in pretokenize(text):
+                encoded = tuple(chunk.encode("utf-8"))
+                if encoded:
+                    sequences[encoded] += 1
+        expected = []
+        while ByteTokenizer.VOCAB_SIZE + len(expected) < vocab_size:
+            pair_counts: Counter[tuple[int, int]] = Counter()
+            for sequence, frequency in sequences.items():
+                for pair in zip(sequence, sequence[1:]):
+                    pair_counts[pair] += frequency
+            if not pair_counts:
+                break
+            pair = min(
+                pair_counts,
+                key=lambda item: (-pair_counts[item], item),
+            )
+            token_id = ByteTokenizer.VOCAB_SIZE + len(expected)
+            expected.append(pair)
+            replaced: Counter[tuple[int, ...]] = Counter()
+            for sequence, frequency in sequences.items():
+                replaced[
+                    BpeTokenizer._replace_pair(sequence, pair, token_id)
+                ] += frequency
+            sequences = replaced
+
+        self.assertEqual(tokenizer.merges, tuple(expected))
+
     def test_unicode_pretokenizer_is_lossless_and_attaches_spaces(self) -> None:
         text = "Hello, мир! 42\nNext"
         chunks = pretokenize(text)

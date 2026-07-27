@@ -1,5 +1,35 @@
 # Changelog / История изменений
 
+## 0.11.0-dev.3 — 2026-07-27
+
+### English
+
+- BPE vocabulary training now keeps an inverted index from adjacent token
+  pairs to the word sequences containing them. A merge updates only affected
+  sequences instead of rescanning and rewriting every unique word for every
+  vocabulary item.
+- Pair multiplicity, frequency ordering, and deterministic tie-breaking are
+  unchanged. A regression test compares the incremental implementation with
+  the original full-rescan algorithm merge by merge.
+- On a 28.5-million-character Russian corpus, the dependency-free trainer
+  built an 8,192-token vocabulary in about 120 seconds. The result used 97.3%
+  of the vocabulary and encoded validation text at 1.83 tokens per word.
+  Runtime depends on corpus vocabulary and hardware.
+
+### Русский
+
+- Обучение BPE теперь хранит обратный индекс от соседних пар токенов к
+  последовательностям слов, где эти пары встречаются. После слияния
+  обновляются только затронутые последовательности вместо полного повторного
+  прохода по всем уникальным словам для каждого элемента словаря.
+- Учёт повторов пары, порядок по частоте и детерминированное разрешение
+  совпадений не изменились. Регрессионный тест сравнивает новый алгоритм со
+  старым полным пересчётом после каждого слияния.
+- На русском корпусе объёмом 28,5 млн символов встроенный тренер без внешних
+  зависимостей собрал словарь из 8 192 токенов примерно за 120 секунд.
+  Использовано 97,3% словаря, validation-текст кодируется в среднем 1,83
+  токена на слово. Время зависит от словаря корпуса и оборудования.
+
 ## 0.11.0-dev.2 — 2026-07-27
 
 ### English

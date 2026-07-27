@@ -6,6 +6,7 @@ import json
 import os
 import re
 import unicodedata
+from heapq import heapify, heappop, heappush
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -744,16 +745,80 @@ def train_bpe_tokenizer(
                 token_id = ByteTokenizer.VOCAB_SIZE + len(merges) - 1
             encoded = BpeTokenizer._replace_pair(encoded, pair, token_id)
 
+    # Ordinary BPE merges used to rescan and rewrite every unique chunk for
+    # every vocabulary item. That produces the correct result, but makes a
+    # 16k vocabulary impractical on a real corpus. Keep an inverted index from
+    # adjacent pairs to the sequences containing them and update only the
+    # affected sequences after a merge. Pair multiplicity is retained, so the
+    # selected pair and deterministic tie-breaking are identical to the
+    # straightforward full rescan.
+    sequence_values = [tuple(sequence) for sequence in sequences]
+    sequence_frequencies = [sequences[sequence] for sequence in sequences]
+    pair_counts: Counter[tuple[int, int]] = Counter()
+    pair_sequences: dict[tuple[int, int], set[int]] = {}
+    for sequence_index, (sequence, frequency) in enumerate(
+        zip(sequence_values, sequence_frequencies)
+    ):
+        multiplicities = Counter(zip(sequence, sequence[1:]))
+        for pair, multiplicity in multiplicities.items():
+            pair_counts[pair] += frequency * multiplicity
+            pair_sequences.setdefault(pair, set()).add(sequence_index)
+
+    candidates = [
+        (-frequency, pair)
+        for pair, frequency in pair_counts.items()
+        if frequency > 0
+    ]
+    heapify(candidates)
     while ByteTokenizer.VOCAB_SIZE + len(merges) < vocab_size:
-        pair_counts: Counter[tuple[int, int]] = Counter()
-        for sequence, frequency in sequences.items():
-            for pair in zip(sequence, sequence[1:]):
-                pair_counts[pair] += frequency
-        eligible = [pair for pair, frequency in pair_counts.items() if frequency >= min_frequency]
-        if not eligible:
+        while candidates:
+            negative_frequency, pair = heappop(candidates)
+            current_frequency = pair_counts.get(pair, 0)
+            if current_frequency == -negative_frequency:
+                break
+        else:
             break
-        pair = min(eligible, key=lambda item: (-pair_counts[item], item))
-        add_merge(pair)
+        if current_frequency < min_frequency:
+            break
+
+        token_id = ByteTokenizer.VOCAB_SIZE + len(merges)
+        merges.append(pair)
+        affected = tuple(pair_sequences.pop(pair, ()))
+        changed_pairs: set[tuple[int, int]] = {pair}
+        for sequence_index in affected:
+            old_sequence = sequence_values[sequence_index]
+            new_sequence = BpeTokenizer._replace_pair(
+                old_sequence, pair, token_id,
+            )
+            if new_sequence == old_sequence:
+                continue
+            frequency = sequence_frequencies[sequence_index]
+            old_multiplicities = Counter(zip(old_sequence, old_sequence[1:]))
+            new_multiplicities = Counter(zip(new_sequence, new_sequence[1:]))
+            old_pairs = set(old_multiplicities)
+            new_pairs = set(new_multiplicities)
+            for changed_pair in old_pairs | new_pairs:
+                delta = (
+                    new_multiplicities.get(changed_pair, 0)
+                    - old_multiplicities.get(changed_pair, 0)
+                ) * frequency
+                if delta:
+                    pair_counts[changed_pair] += delta
+                    changed_pairs.add(changed_pair)
+            for removed_pair in old_pairs - new_pairs:
+                indices = pair_sequences.get(removed_pair)
+                if indices is not None:
+                    indices.discard(sequence_index)
+                    if not indices:
+                        pair_sequences.pop(removed_pair, None)
+            for added_pair in new_pairs - old_pairs:
+                pair_sequences.setdefault(added_pair, set()).add(sequence_index)
+            sequence_values[sequence_index] = new_sequence
+
+        for changed_pair in changed_pairs:
+            frequency = pair_counts.get(changed_pair, 0)
+            if frequency > 0:
+                heappush(candidates, (-frequency, changed_pair))
     return BpeTokenizer(
         merges,
         pretokenizer=pretokenizer,
