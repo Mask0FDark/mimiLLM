@@ -9,7 +9,7 @@ from .audit import (
 )
 from .attention import MultiHeadCausalSelfAttention
 from .backend import get_backend, reset_backend
-from .backend_cuda import CudaBackend, is_available as cuda_is_available
+from .cuda_backend_loader import CudaBackend, is_available as cuda_is_available
 from .checkpoint import CheckpointData, load_checkpoint, save_checkpoint
 from .dataset import (
     TokenDataset,
