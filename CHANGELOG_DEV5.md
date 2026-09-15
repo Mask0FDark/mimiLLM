@@ -37,6 +37,12 @@
 - Добавлен `tools/tokenize_corpus.py`, который читает raw-текст ограниченными кусками и собирает shards с ограниченным RAM buffer.
 - Добавлены end-to-end тесты writer/reader, recursive discovery, повреждённого файла, tokenizer mismatch, TokenDataset mmap sampling и потокового конвертера.
 
+### Windows CUDA 13
+
+- Исправлен поиск NVRTC и cuBLAS после изменения структуры CUDA Toolkit 13.x на Windows: DLL теперь могут находиться в `bin\\x64`, а не только в прежнем `bin`.
+- Новый загрузчик сначала проверяет `bin\\x64`, затем старый `bin`, поэтому сохраняется совместимость с CUDA 12 и более ранними установками.
+- Пользователю больше не требуется вручную копировать DLL из установленного CUDA Toolkit.
+
 ## English
 
 ### AdamW correctness
@@ -58,3 +64,8 @@
 - Removed the unused flattened `TokenDataset.tokens` duplicate.
 - Added tokenizer-bound `.mmtok` mmap shards using uint16/uint32 token IDs.
 - Added bounded-memory raw-corpus conversion and mmap dataset regression tests.
+
+### Windows CUDA 13
+
+- Added CUDA 13.x Windows DLL-layout compatibility by searching `bin\\x64` before the legacy `bin` directory for NVRTC and cuBLAS.
+- CUDA 12-and-older layouts remain supported without requiring manual DLL copies.
