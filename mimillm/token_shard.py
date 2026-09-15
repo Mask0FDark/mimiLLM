@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import mmap
 import os
 import struct
@@ -13,9 +15,45 @@ from pathlib import Path
 
 MAGIC = b"MIMTOK1\0"
 VERSION = 1
-HEADER = struct.Struct("<8sIIIQ")
+HEADER = struct.Struct("<8sIIIQ32s")
 TOKEN_SHARD_SUFFIX = ".mmtok"
 _SUPPORTED_ITEM_SIZES = {2: "H", 4: "I"}
+
+
+def tokenizer_fingerprint(tokenizer: object) -> str:
+    """Возвращает стабильный SHA-256 точной конфигурации токенизатора."""
+    vocab_size = getattr(tokenizer, "VOCAB_SIZE", None)
+    if not isinstance(vocab_size, int) or vocab_size <= 0:
+        raise TypeError("tokenizer должен содержать положительный VOCAB_SIZE")
+    payload: dict[str, object] = {
+        "type": f"{type(tokenizer).__module__}.{type(tokenizer).__qualname__}",
+        "vocab_size": vocab_size,
+    }
+    to_dict = getattr(tokenizer, "to_dict", None)
+    if callable(to_dict):
+        state = to_dict()
+        if not isinstance(state, dict):
+            raise TypeError("tokenizer.to_dict() должен возвращать dict")
+        payload["state"] = state
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _fingerprint_bytes(value: str) -> bytes:
+    if not isinstance(value, str) or len(value) != 64:
+        raise ValueError("tokenizer_sha256 должен содержать 64 hex-символа")
+    try:
+        result = bytes.fromhex(value)
+    except ValueError as exc:
+        raise ValueError("tokenizer_sha256 должен быть корректным SHA-256") from exc
+    if len(result) != 32:
+        raise ValueError("tokenizer_sha256 должен быть корректным SHA-256")
+    return result
 
 
 class MappedTokenShard(Sequence[int]):
@@ -26,6 +64,7 @@ class MappedTokenShard(Sequence[int]):
         path: str | Path,
         *,
         expected_vocab_size: int | None = None,
+        expected_tokenizer_sha256: str | None = None,
     ) -> None:
         self.path = Path(path)
         self._stream = self.path.open("rb")
@@ -33,9 +72,14 @@ class MappedTokenShard(Sequence[int]):
             raw_header = self._stream.read(HEADER.size)
             if len(raw_header) != HEADER.size:
                 raise ValueError(f"token shard слишком короткий: {self.path}")
-            magic, version, item_size, vocab_size, token_count = HEADER.unpack(
-                raw_header
-            )
+            (
+                magic,
+                version,
+                item_size,
+                vocab_size,
+                token_count,
+                fingerprint,
+            ) = HEADER.unpack(raw_header)
             if magic != MAGIC:
                 raise ValueError(f"неверный magic token shard: {self.path}")
             if version != VERSION:
@@ -56,6 +100,15 @@ class MappedTokenShard(Sequence[int]):
                     f"token shard vocabulary={vocab_size}, "
                     f"tokenizer vocabulary={expected_vocab_size}: {self.path}"
                 )
+            if expected_tokenizer_sha256 is not None:
+                expected_fingerprint = _fingerprint_bytes(
+                    expected_tokenizer_sha256
+                )
+                if fingerprint != expected_fingerprint:
+                    raise ValueError(
+                        "token shard создан другим токенизатором: "
+                        f"{self.path}"
+                    )
             expected_size = HEADER.size + token_count * item_size
             actual_size = os.fstat(self._stream.fileno()).st_size
             if actual_size != expected_size:
@@ -64,10 +117,11 @@ class MappedTokenShard(Sequence[int]):
                     f"ожидалось {expected_size}, получено {actual_size}: {self.path}"
                 )
             if token_count < 2:
-                raise ValueError(f"token shard должен содержать минимум 2 токена")
+                raise ValueError("token shard должен содержать минимум 2 токена")
             self.item_size = item_size
             self.vocab_size = vocab_size
             self.token_count = token_count
+            self.tokenizer_sha256 = fingerprint.hex()
             self._format = "<H" if item_size == 2 else "<I"
             self._map = mmap.mmap(
                 self._stream.fileno(),
@@ -163,6 +217,7 @@ def load_token_shards(
     paths: Iterable[str | Path] | str | Path,
     *,
     expected_vocab_size: int | None = None,
+    expected_tokenizer_sha256: str | None = None,
 ) -> list[MappedTokenShard]:
     """Открывает все найденные shards через read-only mmap."""
     result: list[MappedTokenShard] = []
@@ -172,6 +227,7 @@ def load_token_shards(
                 MappedTokenShard(
                     path,
                     expected_vocab_size=expected_vocab_size,
+                    expected_tokenizer_sha256=expected_tokenizer_sha256,
                 )
             )
     except Exception:
@@ -196,11 +252,13 @@ def write_token_shard(
     tokens: Iterable[int],
     *,
     vocab_size: int,
+    tokenizer_sha256: str,
     item_size: int | None = None,
     chunk_tokens: int = 1_000_000,
 ) -> Path:
     """Потоково записывает token IDs без материализации всего корпуса в RAM."""
     selected_item_size = item_size or _select_item_size(vocab_size)
+    fingerprint = _fingerprint_bytes(tokenizer_sha256)
     if selected_item_size not in _SUPPORTED_ITEM_SIZES:
         raise ValueError("item_size должен быть 2 или 4")
     if selected_item_size == 2 and vocab_size > 0x10000:
@@ -225,6 +283,7 @@ def write_token_shard(
                     selected_item_size,
                     int(vocab_size),
                     0,
+                    fingerprint,
                 )
             )
             for raw_token in tokens:
@@ -259,6 +318,7 @@ def write_token_shard(
                     selected_item_size,
                     int(vocab_size),
                     count,
+                    fingerprint,
                 )
             )
             stream.flush()
