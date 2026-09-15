@@ -10,7 +10,7 @@ from array import array
 from pathlib import Path
 
 from mimillm.dataset import discover_text_files
-from mimillm.token_shard import tokenizer_fingerprint, write_token_shard
+from mimillm.token_shard import MappedTokenShard, tokenizer_fingerprint, write_token_shard
 from mimillm.tokenizer import create_tokenizer
 from mimillm.transformer import TransformerConfig
 
@@ -50,7 +50,7 @@ def _iter_encoded_chunks(
                     break
                 if not text.strip():
                     continue
-                yield path, encode(text, add_bos=True, add_eos=True)
+                yield encode(text, add_bos=True, add_eos=True)
 
 
 def build_shards(
@@ -93,8 +93,7 @@ def build_shards(
     pending = array("I")
     shard_index = 0
     total_tokens = 0
-    source_characters = 0
-    sources_seen: set[str] = set()
+    source_bytes = sum(path.stat().st_size for path in files)
     written: list[dict[str, object]] = []
 
     def flush(count: int) -> None:
@@ -114,16 +113,11 @@ def build_shards(
         total_tokens += len(values)
         pending = pending[count:]
 
-    for source_path, encoded in _iter_encoded_chunks(
+    for encoded in _iter_encoded_chunks(
         files,
         tokenizer,
         chunk_characters=chunk_characters,
     ):
-        sources_seen.add(source_path.as_posix())
-        try:
-            source_characters += source_path.stat().st_size
-        except OSError:
-            pass
         offset = 0
         while offset < len(encoded):
             capacity = shard_tokens - len(pending)
@@ -139,16 +133,15 @@ def build_shards(
             # в последний файл через безопасную пересборку его небольшого хвоста.
             last = written.pop()
             last_path = output_dir / str(last["file"])
-            from mimillm.token_shard import MappedTokenShard
             with MappedTokenShard(
                 last_path,
                 expected_vocab_size=config.vocab_size,
                 expected_tokenizer_sha256=fingerprint,
             ) as shard:
                 merged = array("I", shard[:])
-            merged.extend(pending)
             last_path.unlink()
             total_tokens -= int(last["tokens"])
+            merged.extend(pending)
             write_token_shard(
                 last_path,
                 merged,
@@ -161,6 +154,9 @@ def build_shards(
         else:
             flush(len(pending))
 
+    if not written:
+        raise ValueError("после токенизации корпус не содержит достаточно токенов")
+
     manifest = {
         "format": "mimiLLM-token-shards",
         "version": 1,
@@ -169,7 +165,7 @@ def build_shards(
         "tokenizer_sha256": fingerprint,
         "source": str(source),
         "source_files": len(files),
-        "source_bytes": source_characters,
+        "source_bytes": source_bytes,
         "tokens": total_tokens,
         "shards": written,
         "shard_tokens_target": shard_tokens,
