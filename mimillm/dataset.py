@@ -8,7 +8,12 @@ import random
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from .token_shard import MappedTokenShard, discover_token_shards, load_token_shards
+from .token_shard import (
+    MappedTokenShard,
+    discover_token_shards,
+    load_token_shards,
+    tokenizer_fingerprint,
+)
 from .tokenizer import ByteTokenizer, format_dialogue_prompt
 
 
@@ -367,6 +372,7 @@ class TokenDataset:
                 self.text_sequences = load_token_shards(
                     corpus_files,
                     expected_vocab_size=self.tokenizer.VOCAB_SIZE,
+                    expected_tokenizer_sha256=tokenizer_fingerprint(self.tokenizer),
                 )
             else:
                 self.text_documents = []
