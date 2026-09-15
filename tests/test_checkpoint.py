@@ -39,6 +39,67 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(optimizer.step_count, restored_optimizer.step_count)
         self.assertEqual(expected.data, actual.data)
 
+    def test_roundtrip_preserves_partial_gradient_accumulation(self) -> None:
+        config = TransformerConfig(
+            context_length=4,
+            d_model=4,
+            n_layers=1,
+            n_heads=1,
+            d_mlp=8,
+            batch_size=1,
+            gradient_accumulation_steps=2,
+            steps=2,
+            validation_interval=2,
+            checkpoint_interval=2,
+        )
+        original = DecoderTransformer(config)
+        optimizer = AdamW(original.parameters(), 0.01, weight_decay=0.0)
+        first_loss = original([[257, 1, 2, 3]]).reshape(
+            -1, 260
+        ).cross_entropy([1, 2, 3, 258])
+        first_loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        self.assertEqual(optimizer.accumulation_count, 1)
+        self.assertEqual(optimizer.step_count, 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "partial.bin"
+            save_checkpoint(
+                path,
+                original,
+                optimizer,
+                config=config.to_dict(),
+                step=1,
+                seed=42,
+            )
+            restored = DecoderTransformer(config)
+            restored_optimizer = AdamW(
+                restored.parameters(), 0.5, weight_decay=0.0,
+            )
+            load_checkpoint(path, restored, restored_optimizer)
+
+            self.assertEqual(restored_optimizer.accumulation_count, 1)
+            self.assertEqual(restored_optimizer.gradient_accumulation_steps, 2)
+            second_targets = [2, 3, 4, 258]
+            original_loss = original([[257, 2, 3, 4]]).reshape(
+                -1, 260
+            ).cross_entropy(second_targets)
+            restored_loss = restored([[257, 2, 3, 4]]).reshape(
+                -1, 260
+            ).cross_entropy(second_targets)
+            original_loss.backward()
+            restored_loss.backward()
+            optimizer.step()
+            restored_optimizer.step()
+
+        for expected, actual in zip(
+            original.parameters(), restored.parameters(),
+        ):
+            self.assertEqual(expected.data, actual.data)
+        self.assertEqual(optimizer.step_count, 1)
+        self.assertEqual(restored_optimizer.step_count, 1)
+
     def test_corruption_is_detected(self) -> None:
         model = DecoderTransformer(self.config)
         with tempfile.TemporaryDirectory() as directory:
