@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import random
 import tempfile
 import unittest
 from pathlib import Path
 
+from mimillm.dataset import TokenDataset
 from mimillm.token_shard import (
     HEADER,
     MAGIC,
@@ -82,6 +84,42 @@ class TokenShardTests(unittest.TestCase):
             finally:
                 for shard in shards:
                     shard.close()
+
+    def test_token_dataset_samples_directly_from_mmap_shard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "train.mmtok"
+            tokens = [257, *range(1, 65), 258]
+            write_token_shard(path, tokens, vocab_size=260)
+            dataset = TokenDataset(text_paths=root, text_ratio=1.0)
+            try:
+                self.assertEqual(dataset.text_storage, "shard")
+                self.assertEqual(dataset.text_documents, [])
+                self.assertEqual(dataset.text_tokens, len(tokens))
+                self.assertFalse(hasattr(dataset, "tokens"))
+                self.assertIsInstance(dataset.text_sequences[0], MappedTokenShard)
+                inputs, targets, weights = dataset.sample_batch_with_loss_weights(
+                    1, 16, random.Random(7)
+                )
+                self.assertEqual(inputs[0][1:], targets[0][:-1])
+                self.assertTrue(all(weight == 1.0 for weight in weights[0]))
+                supervised = sum(
+                    sum(sum(row) for row in batch_weights)
+                    for _, _, batch_weights in dataset.validation_batches(
+                        1, 16, source="text"
+                    )
+                )
+                self.assertEqual(supervised, len(tokens) - 1)
+            finally:
+                dataset.close()
+
+    def test_raw_and_mmap_files_cannot_be_mixed_implicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "raw.txt").write_text("обычный текст", encoding="utf-8")
+            write_token_shard(root / "tokens.mmtok", [257, 1, 258], vocab_size=260)
+            with self.assertRaisesRegex(ValueError, "не должен смешивать"):
+                TokenDataset(text_paths=root, text_ratio=1.0)
 
 
 if __name__ == "__main__":
