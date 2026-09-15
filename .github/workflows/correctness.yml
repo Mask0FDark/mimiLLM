@@ -29,7 +29,7 @@ jobs:
           python-version: "3.12"
 
       - name: Проверить синтаксис
-        run: python -m compileall -q mimillm tests
+        run: python -m compileall -q mimillm tests tools
 
       - name: Проверить optimizer и checkpoint
         run: |
@@ -43,6 +43,7 @@ jobs:
         run: |
           python -m unittest discover -s tests -p "test_dataset.py" -v
           python -m unittest discover -s tests -p "test_token_shard.py" -v
+          python -m unittest discover -s tests -p "test_tokenize_corpus.py" -v
 
       - name: Проверить цикл обучения
         run: python -m unittest discover -s tests -p "test_training_smoke.py" -v
