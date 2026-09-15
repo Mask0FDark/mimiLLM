@@ -44,3 +44,6 @@ jobs:
 
       - name: Проверить pipeline
         run: python -m unittest discover -s tests -p "test_pipeline.py" -v
+
+      - name: Проверить CUDA-регрессию в режиме skip без NVIDIA
+        run: python -m unittest discover -s tests -p "test_cuda_accumulation.py" -v
