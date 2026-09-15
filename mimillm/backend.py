@@ -24,7 +24,7 @@ def get_backend() -> Any:
     cuda_disabled = os.environ.get("MIMILLM_DISABLE_CUDA", "0") == "1"
     if requested == "cuda" or (requested == "auto" and not cuda_disabled):
         try:
-            from .backend_cuda import CudaBackend
+            from .cuda_backend_loader import CudaBackend
 
             _backend = CudaBackend()
             return _backend
