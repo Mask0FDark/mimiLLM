@@ -55,6 +55,13 @@ from .static_cuda import (
     compile_static_cuda_validation,
 )
 from .tensor import Tensor, is_grad_enabled, no_grad
+from .token_shard import (
+    MappedTokenShard,
+    discover_token_shards,
+    load_token_shards,
+    tokenizer_fingerprint,
+    write_token_shard,
+)
 from .tokenizer import (
     BpeTokenizer,
     ByteTokenizer,
@@ -100,6 +107,7 @@ __all__ = [
     "HailoRuntimeInfo",
     "LanguageModel",
     "Linear",
+    "MappedTokenShard",
     "ModelConfig",
     "Module",
     "MultiHeadCausalSelfAttention",
@@ -133,6 +141,7 @@ __all__ = [
     "cuda_is_available",
     "discover_question_files",
     "discover_text_files",
+    "discover_token_shards",
     "detokenize",
     "evaluate_dialogues",
     "format_dialogue_prompt",
@@ -149,6 +158,7 @@ __all__ = [
     "load_model",
     "load_qa_text",
     "load_safetensors",
+    "load_token_shards",
     "load_tokenizer",
     "load_text_documents",
     "no_grad",
@@ -165,12 +175,14 @@ __all__ = [
     "save_tokenizer",
     "save_tokenizer_report",
     "tokenize",
+    "tokenizer_fingerprint",
     "train_from_config",
     "train_bpe_tokenizer",
     "train_model",
     "train_pipeline",
     "train_tokenizer_from_config",
     "validation_loss",
+    "write_token_shard",
 ]
 
-__version__ = "0.11.0.dev4"
+__version__ = "0.11.0.dev5"

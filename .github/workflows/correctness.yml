@@ -1,0 +1,55 @@
+name: Проверка корректности обучения
+
+on:
+  push:
+    branches:
+      - perf/static-cuda
+      - fix/korrektnoe-obuchenie
+  pull_request:
+    branches:
+      - perf/static-cuda
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-correctness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MIMILLM_BACKEND: python
+      MIMILLM_DISABLE_CUDA: "1"
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@v4
+
+      - name: Настроить Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Проверить синтаксис
+        run: python -m compileall -q mimillm tests tools
+
+      - name: Проверить optimizer и checkpoint
+        run: |
+          python -m unittest discover -s tests -p "test_optimizer.py" -v
+          python -m unittest discover -s tests -p "test_checkpoint.py" -v
+
+      - name: Проверить Transformer и конфигурацию
+        run: python -m unittest discover -s tests -p "test_transformer.py" -v
+
+      - name: Проверить датасеты и mmap token shards
+        run: |
+          python -m unittest discover -s tests -p "test_dataset.py" -v
+          python -m unittest discover -s tests -p "test_token_shard.py" -v
+          python -m unittest discover -s tests -p "test_tokenize_corpus.py" -v
+
+      - name: Проверить цикл обучения
+        run: python -m unittest discover -s tests -p "test_training_smoke.py" -v
+
+      - name: Проверить pipeline
+        run: python -m unittest discover -s tests -p "test_pipeline.py" -v
+
+      - name: Проверить CUDA-регрессию в режиме skip без NVIDIA
+        run: python -m unittest discover -s tests -p "test_cuda_accumulation.py" -v

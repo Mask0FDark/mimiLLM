@@ -31,10 +31,12 @@ class TransformerConfig:
     n_heads: int = 4
     d_mlp: int = 192
     batch_size: int = 2
+    gradient_accumulation_steps: int = 1
     batches_per_epoch: int | None = None
     steps: int = 100
     learning_rate: float = 3e-4
     weight_decay: float = 0.01
+    weight_decay_exclude_1d: bool = False
     adam_beta1: float = 0.9
     adam_beta2: float = 0.95
     adam_epsilon: float = 1e-8
@@ -64,11 +66,26 @@ class TransformerConfig:
     def __post_init__(self) -> None:
         integer_positive = (
             "vocab_size", "context_length", "d_model", "n_layers", "n_heads",
-            "d_mlp", "batch_size", "steps",
+            "d_mlp", "batch_size", "gradient_accumulation_steps", "steps",
         )
         for name in integer_positive:
-            if getattr(self, name) <= 0:
-                raise ValueError(f"{name} должен быть положительным")
+            value = getattr(self, name)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} должен быть положительным целым числом")
+        if self.steps % self.gradient_accumulation_steps:
+            raise ValueError(
+                "steps должен делиться на gradient_accumulation_steps без остатка"
+            )
+        for name in ("validation_interval", "checkpoint_interval"):
+            interval = getattr(self, name)
+            if interval % self.gradient_accumulation_steps:
+                raise ValueError(
+                    f"{name} должен делиться на gradient_accumulation_steps без остатка"
+                )
         if self.batches_per_epoch is not None and (
             not isinstance(self.batches_per_epoch, int)
             or isinstance(self.batches_per_epoch, bool)
@@ -79,6 +96,8 @@ class TransformerConfig:
             raise TypeError("tokenizer must be a string")
         if not isinstance(self.tie_word_embeddings, bool):
             raise TypeError("tie_word_embeddings must be a boolean")
+        if not isinstance(self.weight_decay_exclude_1d, bool):
+            raise TypeError("weight_decay_exclude_1d must be a boolean")
         tokenizer_sizes = {
             "byte": ByteTokenizer.VOCAB_SIZE,
             "unicode": UnicodeByteTokenizer.VOCAB_SIZE,
@@ -294,6 +313,13 @@ class DecoderTransformer(Module):
         else:
             self.output = Linear(config.d_model, config.vocab_size, rng=rng)
             self.output_bias = None
+        for parameter in self.parameters():
+            parameter._mimillm_gradient_accumulation_steps = (
+                config.gradient_accumulation_steps
+            )
+            parameter._mimillm_weight_decay_enabled = not (
+                config.weight_decay_exclude_1d and parameter.ndim < 2
+            )
 
     @property
     def blocks(self) -> list[TransformerBlock]:

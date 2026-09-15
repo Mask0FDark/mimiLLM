@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 import math
 import random
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
+from .token_shard import (
+    MappedTokenShard,
+    discover_token_shards,
+    load_token_shards,
+    tokenizer_fingerprint,
+)
 from .tokenizer import ByteTokenizer, format_dialogue_prompt
 
 
@@ -199,7 +205,6 @@ def discover_text_files(paths: Iterable[str | Path] | str | Path) -> list[Path]:
             )
         else:
             raise FileNotFoundError(f"путь текстового корпуса не найден: {path}")
-    # resolved нужен только для устранения повторов; наружу возвращаются удобные исходные пути.
     unique: dict[Path, Path] = {}
     for path in sorted(discovered, key=lambda value: value.as_posix().casefold()):
         unique.setdefault(path.resolve(), path)
@@ -219,6 +224,47 @@ def load_text_documents(paths: Iterable[str | Path] | str | Path) -> list[tuple[
     if not documents:
         raise ValueError("текстовый корпус не содержит непустых документов")
     return documents
+
+
+def _corpus_storage_mode(
+    paths: Iterable[str | Path] | str | Path,
+) -> tuple[str, list[Path]]:
+    """Однозначно выбирает raw UTF-8 либо `.mmtok`, не смешивая форматы."""
+    requested = [paths] if isinstance(paths, (str, Path)) else list(paths)
+    raw_files: list[Path] = []
+    shard_files: list[Path] = []
+    for item in requested:
+        path = Path(item)
+        if path.is_file():
+            suffix = path.suffix.lower()
+            if suffix in TEXT_SUFFIXES:
+                raw_files.append(path)
+            elif suffix == ".mmtok":
+                shard_files.append(path)
+            else:
+                raise ValueError(f"неподдерживаемый файл текстового корпуса: {path}")
+        elif path.is_dir():
+            raw_files.extend(
+                child for child in path.rglob("*")
+                if child.is_file() and child.suffix.lower() in TEXT_SUFFIXES
+            )
+            shard_files.extend(
+                child for child in path.rglob("*.mmtok") if child.is_file()
+            )
+        else:
+            raise FileNotFoundError(f"путь текстового корпуса не найден: {path}")
+    if raw_files and shard_files:
+        raise ValueError(
+            "текстовый корпус не должен смешивать raw UTF-8 файлы и .mmtok shards"
+        )
+    if shard_files:
+        return "shard", discover_token_shards(paths)
+    if raw_files:
+        unique: dict[Path, Path] = {}
+        for path in sorted(raw_files, key=lambda value: value.as_posix().casefold()):
+            unique.setdefault(path.resolve(), path)
+        return "raw", list(unique.values())
+    raise ValueError("текстовый корпус не содержит поддерживаемых файлов")
 
 
 class TokenDataset:
@@ -315,19 +361,51 @@ class TokenDataset:
             id(sequence): len(self.tokenizer.encode_prompt(question))
             for sequence, (question, _) in zip(self.sequences, self.examples)
         }
-        self.text_documents = load_text_documents(text_paths) if text_paths is not None else []
-        self.text_sequences = [
-            self.tokenizer.encode(text, add_bos=True, add_eos=True)
-            for _, text in self.text_documents
-        ]
+
+        self.text_documents: list[tuple[Path, str]] = []
+        self.text_sequences: list[Sequence[int]] = []
+        self.text_storage = "none"
+        if text_paths is not None:
+            storage_mode, corpus_files = _corpus_storage_mode(text_paths)
+            self.text_storage = storage_mode
+            if storage_mode == "shard":
+                self.text_sequences = load_token_shards(
+                    corpus_files,
+                    expected_vocab_size=self.tokenizer.VOCAB_SIZE,
+                    expected_tokenizer_sha256=tokenizer_fingerprint(self.tokenizer),
+                )
+            else:
+                self.text_documents = []
+                for text_path in corpus_files:
+                    text = text_path.read_text(encoding="utf-8").strip()
+                    if text:
+                        self.text_documents.append((text_path, text))
+                if not self.text_documents:
+                    raise ValueError("текстовый корпус не содержит непустых документов")
+                self.text_sequences = [
+                    self.tokenizer.encode(text, add_bos=True, add_eos=True)
+                    for _, text in self.text_documents
+                ]
+
         self.qa_tokens = sum(len(sequence) for sequence in self.sequences)
         self.text_tokens = sum(len(sequence) for sequence in self.text_sequences)
-        self.tokens = [token for sequence in [*self.sequences, *self.text_sequences] for token in sequence]
-        if len(self.tokens) < 2:
+        if self.qa_tokens + self.text_tokens < 2:
             raise ValueError("в датасете недостаточно токенов")
         if any(len(sequence) < 2 for sequence in [*self.sequences, *self.text_sequences]):
             raise ValueError("пример датасета слишком короткий")
         self.last_source = next(iter(self.qa_source_weights), "text")
+
+    def close(self) -> None:
+        """Закрывает mmap shards; для обычных list это пустая операция."""
+        for sequence in self.text_sequences:
+            if isinstance(sequence, MappedTokenShard):
+                sequence.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def source_weights(self) -> list[tuple[str, float]]:
         """Возвращает фактические вероятности источников с учётом их наличия."""
@@ -352,14 +430,13 @@ class TokenDataset:
 
     def _choose_sequences(
         self, source: str, batch_size: int, context_length: int, rng: random.Random,
-    ) -> list[list[int]]:
-        sequences = (
+    ) -> list[Sequence[int]]:
+        sequences: Sequence[Sequence[int]] = (
             self.text_sequences
             if source == "text"
             else self.qa_sequences_by_source[source]
         )
         if source == "text":
-            # Большие документы содержат больше разных окон и должны встречаться чаще.
             weights = [max(1, len(sequence) - context_length) for sequence in sequences]
             return rng.choices(sequences, weights=weights, k=batch_size)
         return [rng.choice(sequences) for _ in range(batch_size)]
@@ -378,13 +455,12 @@ class TokenDataset:
         targets: list[list[int]] = []
         for sequence in selected:
             maximum_start = len(sequence) - window_size
-            # QA чаще начинается с вопроса; у длинного текста равномерно изучаются все участки.
             prefix_probability = 0.7 if source != "text" else 0.1
             start = (
                 0 if maximum_start == 0 or rng.random() < prefix_probability
                 else rng.randint(1, maximum_start)
             )
-            window = sequence[start:start + window_size]
+            window = list(sequence[start:start + window_size])
             inputs.append(window[:-1])
             targets.append(window[1:])
         return inputs, targets
@@ -409,7 +485,7 @@ class TokenDataset:
 
     def _batch_with_loss_weights(
         self,
-        selected: list[list[int]],
+        selected: list[Sequence[int]],
         source: str,
         context_length: int,
         *,
@@ -434,10 +510,6 @@ class TokenDataset:
                 elif answer_start < actual_size and rng.random() < 0.7:
                     start = 0
                 else:
-                    # Long answers need windows that begin inside the answer as
-                    # well. Restricting the latest start to answer_start - 1
-                    # silently left every target after the first context-sized
-                    # answer chunk unseen during training.
                     start = rng.randint(earliest_answer_window, maximum_start)
             else:
                 if rng is None:
@@ -445,7 +517,7 @@ class TokenDataset:
                 else:
                     start = 0 if maximum_start == 0 else rng.randint(0, maximum_start)
                 answer_start = 0
-            window = sequence[start:start + actual_size]
+            window = list(sequence[start:start + actual_size])
             row_inputs = window[:-1]
             row_targets = window[1:]
             if source != "text":
@@ -484,7 +556,7 @@ class TokenDataset:
         selected_source = source or self.source_weights()[0][0]
         if selected_source not in {name for name, _ in self.source_weights()}:
             raise ValueError(f"источник {selected_source!r} отсутствует или имеет нулевой вес")
-        sequences = (
+        sequences: Sequence[Sequence[int]] = (
             self.text_sequences
             if selected_source == "text"
             else self.qa_sequences_by_source[selected_source]
@@ -495,7 +567,7 @@ class TokenDataset:
         for index, sequence in enumerate(selected):
             maximum_start = len(sequence) - window_size
             start = ((offset + index) * context_length) % (maximum_start + 1)
-            window = sequence[start:start + window_size]
+            window = list(sequence[start:start + window_size])
             inputs.append(window[:-1])
             targets.append(window[1:])
         return inputs, targets
@@ -510,7 +582,7 @@ class TokenDataset:
         selected_source = source or self.source_weights()[0][0]
         if selected_source not in {name for name, _ in self.source_weights()}:
             raise ValueError(f"источник {selected_source!r} отсутствует или имеет нулевой вес")
-        sequences = (
+        sequences: Sequence[Sequence[int]] = (
             self.text_sequences
             if selected_source == "text"
             else self.qa_sequences_by_source[selected_source]
@@ -528,7 +600,7 @@ class TokenDataset:
             raise ValueError("batch_size и context_length должны быть положительными")
         if source not in {name for name, _ in self.source_weights()}:
             raise ValueError(f"источник {source!r} отсутствует или имеет нулевой вес")
-        sequences = (
+        sequences: Sequence[Sequence[int]] = (
             self.text_sequences
             if source == "text"
             else self.qa_sequences_by_source[source]
@@ -542,12 +614,9 @@ class TokenDataset:
             )
             target_position = first_target
             while target_position < len(sequence):
-                # Оставляем до половины окна как историю и покрываем вторую
-                # половину новыми validation-целями. Если весь prompt помещается,
-                # первое QA-окно по-прежнему начинается с BOS.
                 start = max(0, target_position - context_length // 2)
                 end = min(len(sequence), start + context_length + 1)
-                window = sequence[start:end]
+                window = list(sequence[start:end])
                 row_inputs = window[:-1]
                 row_targets = window[1:]
                 row_weights = [
@@ -574,7 +643,7 @@ class TokenDataset:
             raise ValueError("batch_size и context_length должны быть положительными")
         if source not in {name for name, _ in self.source_weights()}:
             raise ValueError(f"источник {source!r} отсутствует или имеет нулевой вес")
-        sequences = (
+        sequences: Sequence[Sequence[int]] = (
             self.text_sequences
             if source == "text"
             else self.qa_sequences_by_source[source]

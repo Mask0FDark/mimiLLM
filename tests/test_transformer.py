@@ -10,6 +10,7 @@ os.environ.setdefault("MIMILLM_BACKEND", "python")
 
 from mimillm.attention import MultiHeadCausalSelfAttention
 from mimillm.layers import Embedding, RMSNorm
+from mimillm.optim import AdamW
 from mimillm.tensor import Tensor
 from mimillm.transformer import DecoderTransformer, TransformerBlock, TransformerConfig
 from mimillm.tokenizer import UnicodeByteTokenizer
@@ -86,6 +87,39 @@ class TransformerTests(unittest.TestCase):
             TransformerConfig(gradient_clip_norm=0.0)
         with self.assertRaisesRegex(ValueError, "qa_source_weights"):
             TransformerConfig(qa_source_weights={"qa.txt": -1.0})
+        with self.assertRaisesRegex(ValueError, "gradient_accumulation_steps"):
+            TransformerConfig(gradient_accumulation_steps=0)
+        with self.assertRaisesRegex(ValueError, "steps"):
+            TransformerConfig(
+                gradient_accumulation_steps=4,
+                steps=10,
+                validation_interval=4,
+                checkpoint_interval=4,
+            )
+        with self.assertRaisesRegex(ValueError, "validation_interval"):
+            TransformerConfig(
+                gradient_accumulation_steps=4,
+                steps=12,
+                validation_interval=5,
+                checkpoint_interval=4,
+            )
+
+    def test_optimizer_hints_follow_training_config(self) -> None:
+        config = replace(
+            self.config,
+            gradient_accumulation_steps=2,
+            steps=4,
+            validation_interval=2,
+            checkpoint_interval=2,
+            weight_decay_exclude_1d=True,
+        )
+        model = DecoderTransformer(config)
+        optimizer = AdamW(model.parameters(), learning_rate=1e-3, weight_decay=0.1)
+        self.assertEqual(optimizer.gradient_accumulation_steps, 2)
+        for parameter, decay_enabled in zip(
+            optimizer.parameters, optimizer.decay_mask,
+        ):
+            self.assertEqual(decay_enabled, parameter.ndim >= 2)
 
     def test_unicode_tokenizer_changes_vocabulary_and_model_shape(self) -> None:
         config = TransformerConfig(

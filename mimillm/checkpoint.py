@@ -12,15 +12,21 @@ from pathlib import Path
 from typing import Any
 
 from .module import Module
-from .optim import AdamW, Optimizer
+from .optim import Optimizer
 from .tensor import Tensor
 
 
 MAGIC = b"MIMILLM1"
-VERSION = 1
+VERSION = 2
+SUPPORTED_VERSIONS = {1, 2}
 HEADER = struct.Struct("<8sIQ")
 MAX_METADATA = 16 * 1024 * 1024
 MAX_VALUES = 500_000_000
+_OPTIMIZER_BUFFER_FIELDS = (
+    "first_moments",
+    "second_moments",
+    "gradient_accumulators",
+)
 
 
 @dataclass
@@ -63,6 +69,40 @@ def _read_floats(stream: Any, count: int) -> array:
     return values
 
 
+def _optimizer_payload(
+    optimizer_state: dict[str, object],
+) -> tuple[dict[str, object], list[array]]:
+    """Отделяет большие float32-буферы от JSON metadata."""
+    optimizer_meta = {
+        key: value
+        for key, value in optimizer_state.items()
+        if key not in _OPTIMIZER_BUFFER_FIELDS
+    }
+    descriptors: list[dict[str, object]] = []
+    payload: list[array] = []
+    for name in _OPTIMIZER_BUFFER_FIELDS:
+        values = optimizer_state.get(name, [])
+        if not isinstance(values, list):
+            raise TypeError(f"optimizer state field {name!r} must be a list")
+        if not values:
+            continue
+        checked: list[array] = []
+        for buffer in values:
+            if not isinstance(buffer, array) or buffer.typecode != "f":
+                raise TypeError(
+                    f"optimizer state field {name!r} must contain array('f') buffers"
+                )
+            checked.append(buffer)
+        descriptors.append({
+            "name": name,
+            "counts": [len(buffer) for buffer in checked],
+        })
+        payload.extend(checked)
+    if descriptors:
+        optimizer_meta["buffer_descriptors"] = descriptors
+    return optimizer_meta, payload
+
+
 def save_checkpoint(
     path: str | Path, model: Module, optimizer: Optimizer | None, *,
     config: dict[str, Any], step: int, seed: int,
@@ -76,18 +116,10 @@ def save_checkpoint(
         for name, parameter in parameters
     ]
     optimizer_state = optimizer.state_dict() if optimizer is not None else None
-    optimizer_meta: dict[str, Any] | None = None
-    moment_buffers: list[array] = []
+    optimizer_meta: dict[str, object] | None = None
+    optimizer_buffers: list[array] = []
     if optimizer_state is not None:
-        optimizer_meta = {
-            key: value for key, value in optimizer_state.items()
-            if key not in {"first_moments", "second_moments"}
-        }
-        first = optimizer_state.get("first_moments", [])
-        second = optimizer_state.get("second_moments", [])
-        if first or second:
-            optimizer_meta["moment_counts"] = [len(values) for values in first]
-            moment_buffers = [*first, *second]  # type: ignore[list-item]
+        optimizer_meta, optimizer_buffers = _optimizer_payload(optimizer_state)
     metadata = {
         "format": "mimiLLM-checkpoint", "config": config, "step": int(step),
         "seed": int(seed), "parameters": descriptors, "optimizer": optimizer_meta,
@@ -101,12 +133,65 @@ def save_checkpoint(
         stream.write(encoded)
         for _, parameter in parameters:
             _write_floats(stream, parameter.data)
-        for values in moment_buffers:
+        for values in optimizer_buffers:
             _write_floats(stream, values)
         stream.flush()
         os.fsync(stream.fileno())
     temporary.replace(destination)
     return destination
+
+
+def _load_optimizer_v1(
+    stream: Any, optimizer_meta: dict[str, object],
+) -> dict[str, object]:
+    """Читает старую схему: один список размеров для first/second moments."""
+    optimizer_state = dict(optimizer_meta)
+    counts = optimizer_state.pop("moment_counts", [])
+    if counts:
+        if not isinstance(counts, list) or not all(isinstance(count, int) for count in counts):
+            raise ValueError("некорректные размеры moments")
+        optimizer_state["first_moments"] = [
+            _read_floats(stream, count) for count in counts
+        ]
+        optimizer_state["second_moments"] = [
+            _read_floats(stream, count) for count in counts
+        ]
+    return optimizer_state
+
+
+def _load_optimizer_v2(
+    stream: Any, optimizer_meta: dict[str, object],
+) -> dict[str, object]:
+    """Читает именованные группы float32-буферов optimizer state."""
+    optimizer_state = dict(optimizer_meta)
+    descriptors = optimizer_state.pop("buffer_descriptors", [])
+    if not isinstance(descriptors, list):
+        raise ValueError("optimizer buffer_descriptors должны быть списком")
+    seen: set[str] = set()
+    for descriptor in descriptors:
+        if not isinstance(descriptor, dict):
+            raise ValueError("неверный descriptor optimizer buffer")
+        name = descriptor.get("name")
+        counts = descriptor.get("counts")
+        if (
+            not isinstance(name, str)
+            or name not in _OPTIMIZER_BUFFER_FIELDS
+            or name in seen
+        ):
+            raise ValueError("неверное или повторное имя optimizer buffer")
+        if (
+            not isinstance(counts, list)
+            or not all(
+                isinstance(count, int) and not isinstance(count, bool) and count >= 0
+                for count in counts
+            )
+        ):
+            raise ValueError(f"некорректные размеры optimizer buffer {name!r}")
+        optimizer_state[name] = [
+            _read_floats(stream, count) for count in counts
+        ]
+        seen.add(name)
+    return optimizer_state
 
 
 def load_checkpoint(
@@ -121,7 +206,7 @@ def load_checkpoint(
         magic, version, metadata_size = HEADER.unpack(header)
         if magic != MAGIC:
             raise ValueError("неверный magic header checkpoint")
-        if version != VERSION:
+        if version not in SUPPORTED_VERSIONS:
             raise ValueError(f"неподдерживаемая версия checkpoint: {version}")
         if metadata_size > MAX_METADATA:
             raise ValueError("metadata checkpoint превышают безопасный предел")
@@ -153,13 +238,11 @@ def load_checkpoint(
         if optimizer_meta is not None:
             if not isinstance(optimizer_meta, dict):
                 raise ValueError("optimizer metadata должны быть объектом")
-            optimizer_state = dict(optimizer_meta)
-            counts = optimizer_state.pop("moment_counts", [])
-            if counts:
-                if not isinstance(counts, list) or not all(isinstance(count, int) for count in counts):
-                    raise ValueError("некорректные размеры moments")
-                optimizer_state["first_moments"] = [_read_floats(stream, count) for count in counts]
-                optimizer_state["second_moments"] = [_read_floats(stream, count) for count in counts]
+            optimizer_state = (
+                _load_optimizer_v1(stream, optimizer_meta)
+                if version == 1
+                else _load_optimizer_v2(stream, optimizer_meta)
+            )
         if stream.read(1):
             raise ValueError("после ожидаемого конца checkpoint обнаружены лишние данные")
     data = CheckpointData(
