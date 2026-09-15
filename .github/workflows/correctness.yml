@@ -39,6 +39,11 @@ jobs:
       - name: Проверить Transformer и конфигурацию
         run: python -m unittest discover -s tests -p "test_transformer.py" -v
 
+      - name: Проверить датасеты и mmap token shards
+        run: |
+          python -m unittest discover -s tests -p "test_dataset.py" -v
+          python -m unittest discover -s tests -p "test_token_shard.py" -v
+
       - name: Проверить цикл обучения
         run: python -m unittest discover -s tests -p "test_training_smoke.py" -v
 
